@@ -1,0 +1,61 @@
+# Logs and temp files
+*.log
+logs/
+loglar/
+# Environment variables
+.env
+.env.local
+*.env.*
+
+# Python cache & bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+*.csv
+
+# Jupyter notebook cache
+.ipynb_checkpoints/
+
+# Editor settings
+.vscode/
+.vscode-test/
+.idea/
+
+# Dependencies (node, etc.)
+node_modules/
+
+# Analysis/cache tooling
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Python packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# General build targets
+target/
+.claude/
+# Pipeline generated data
+data/intermediate/
+data/outputs/
+data/inputs/arsiv/
+#data/inputs/
+catboost_info/
+models/
+*.ipynb
+modeller/
+data/ara_ciktilar/
+data/girdiler/
+data/girdiler/arsiv/
+data/sonuclar/
+gorseller/

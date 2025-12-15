@@ -29,6 +29,38 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import yaml
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ----------------------------
+# LOAD YAML CONFIG
+# ----------------------------
+with open(os.path.join(BASE_DIR, "config.yaml"), "r", encoding="utf-8") as f:
+    CFG = yaml.safe_load(f)
+
+# ----------------------------
+# PATH RESOLUTION
+# ----------------------------
+DATA_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["base"])
+INPUT_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["input"])
+INTERMEDIATE_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["intermediate"])
+OUTPUT_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["output"])
+LOG_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["logs"])
+
+INTERMEDIATE_PATHS = {
+    k: os.path.join(INTERMEDIATE_DIR, v)
+    for k, v in CFG["intermediate_paths"].items()
+}
+
+OUTPUT_PATHS = {
+    k: os.path.join(OUTPUT_DIR, v)
+    for k, v in CFG["output_paths"].items()
+}
+
+SURVIVAL_HORIZONS_DAYS = CFG["survival"]["horizons_days"]
+SURVIVAL_HORIZON_LABELS = CFG["survival"]["horizon_labels"]
 
 # -----------------------------
 # Project root safe import
@@ -80,34 +112,118 @@ from scipy import stats
 # =============================================================================
 # CONFIG (projedeki config.config ile uyumlu)
 # =============================================================================
-from config.config import (
-    DATA_PATHS,
-    INTERMEDIATE_PATHS,
-    OUTPUT_PATHS,
-    LOG_DIR,
-    ANALYSIS_METADATA_PATH,
-    SURVIVAL_HORIZONS_DAYS,
-    SURVIVAL_HORIZON_LABELS,
-    MIN_EQUIPMENT_PER_CLASS,
-    REQUIRE_INSTALL_BEFORE_DATA_END,
-    CHRONIC_WINDOW_DAYS,
-    CHRONIC_THRESHOLD_EVENTS,
-    CHRONIC_MIN_RATE,
-    POF_THRESHOLDS,
-    COF_THRESHOLDS,
-    RISK_MATRIX,
-    EXTRA_FAULT_COLS,
-    COLUMN_MAPPING,
-)
+# ============================
+# CONFIG BINDING (YAML → PY)
+# ============================
+# Around line 122, replace with:
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Around line 122, replace with:
+OUTPUT_PATHS = {
+    k: os.path.join(BASE_DIR, v) if not os.path.isabs(v) else v
+    for k, v in CFG.get("output_paths", {}).items()
+}
+logger = logging.getLogger("pof3_tum_adimlar")
+print("DEBUG OUTPUT_PATHS keys:", list(OUTPUT_PATHS.keys()))
+print("DEBUG OUTPUT_PATHS sample:", {k: OUTPUT_PATHS[k] for k in list(OUTPUT_PATHS.keys())[:3]})
+# ----------------------------
+# LOAD YAML CONFIG
+# ----------------------------
+with open(os.path.join(BASE_DIR, "config.yaml"), "r", encoding="utf-8") as f:
+    CFG = yaml.safe_load(f)
 
-# date parser (senin utils yapın)
-try:
-    from utils.date_parser import parse_date_safely
-except Exception:
-    # fallback
-    def parse_date_safely(x):
-        return pd.to_datetime(x, errors="coerce")
+# ----------------------------
+# PATH RESOLUTION
+# ----------------------------
+DATA_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["base"])
+INPUT_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["input"])
+INTERMEDIATE_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["intermediate"])
+OUTPUT_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["output"])
+LOG_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["logs"])
 
+# Build full paths for data files
+DATA_PATHS = {
+    k: os.path.join(BASE_DIR, v)
+    for k, v in CFG["data_paths"].items()
+}
+
+# Build full paths for intermediate files
+INTERMEDIATE_PATHS = {
+    k: os.path.join(BASE_DIR, v)
+    for k, v in CFG["intermediate_paths"].items()
+}
+
+# Build full paths for output files
+OUTPUT_PATHS = {
+    k: os.path.join(BASE_DIR, v)
+    for k, v in CFG["output_paths"].items()
+}
+
+SURVIVAL_HORIZONS_DAYS = CFG["survival"]["horizons_days"]
+SURVIVAL_HORIZON_LABELS = CFG["survival"]["horizon_labels"]
+
+MIN_EQUIPMENT_PER_CLASS = CFG["analysis"]["min_equipment_per_class"]
+REQUIRE_INSTALL_BEFORE_DATA_END = CFG["analysis"]["require_install_before_data_end"]
+ANALYSIS_METADATA_PATH = os.path.join(BASE_DIR, CFG["analysis"]["analysis_metadata_path"])
+
+CHRONIC_CFG = CFG.get("chronic", {})
+CHRONIC_WINDOW_DAYS_DEFAULT = CHRONIC_CFG.get("window_days_default", 90)
+CHRONIC_MIN_EVENTS_DEFAULT = CHRONIC_CFG.get("min_events_default", 3)
+CHRONIC_MIN_RATE_DEFAULT = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
+CHRONIC_PER_TYPE = CHRONIC_CFG.get("per_type", {})
+
+RISK_CFG = CFG.get("risk", {})
+POF_THRESHOLDS = RISK_CFG.get("pof_thresholds", {})
+COF_BANDS = RISK_CFG.get("cof_bands", [])
+
+ENSEMBLE_CFG = CFG.get("ensemble", {})
+CRITICAL_HEALTH_THRESHOLD = ENSEMBLE_CFG.get("critical_health_threshold", 40)
+
+EXTRA_FAULT_COLS = CFG.get("fault_columns", {}).get("extra_fault_cols", [])
+COLUMN_MAPPING = CFG.get("fault_columns", {}).get("column_mapping", {})
+logger = logging.getLogger("pof3_tum_adimlar")
+print("DEBUG OUTPUT_PATHS keys:", list(OUTPUT_PATHS.keys()))
+print("DEBUG OUTPUT_PATHS sample:", {k: OUTPUT_PATHS[k] for k in list(OUTPUT_PATHS.keys())[:3]})
+MIN_EQUIPMENT_PER_CLASS = CFG["analysis"]["min_equipment_per_class"]
+REQUIRE_INSTALL_BEFORE_DATA_END = CFG["analysis"]["require_install_before_data_end"]
+ANALYSIS_METADATA_PATH = CFG["analysis"]["analysis_metadata_path"]
+
+CHRONIC_CFG = CFG["chronic"]
+
+CHRONIC_WINDOW_DAYS = CHRONIC_CFG.get("window_days_default", 90)
+CHRONIC_THRESHOLD_EVENTS = CHRONIC_CFG.get("min_events_default", 3)
+CHRONIC_MIN_RATE = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
+
+CHRONIC_PER_TYPE = CHRONIC_CFG.get("per_type", {})
+
+
+POF_THRESHOLDS = CFG["risk"]["pof_thresholds"]
+RISK_CFG = CFG.get("risk", {})
+POF_THRESHOLDS = RISK_CFG.get("pof_thresholds", {})
+COF_BANDS = RISK_CFG.get("cof_bands", [])
+
+
+EXTRA_FAULT_COLS = CFG["fault_columns"]["extra_fault_cols"]
+COLUMN_MAPPING = CFG["fault_columns"]["column_mapping"]
+
+
+# ---- Chronic config ----
+CHRONIC_CFG = CFG.get("chronic", {})
+
+CHRONIC_WINDOW_DAYS_DEFAULT = CHRONIC_CFG.get("window_days_default", 90)
+CHRONIC_MIN_EVENTS_DEFAULT = CHRONIC_CFG.get("min_events_default", 3)
+CHRONIC_MIN_RATE_DEFAULT   = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
+
+CHRONIC_PER_TYPE = CHRONIC_CFG.get("per_type", {})
+
+# ---- Risk config ----
+RISK_CFG = CFG.get("risk", {})
+
+POF_THRESHOLDS = RISK_CFG.get("pof_thresholds", {})
+COF_BANDS = RISK_CFG.get("cof_bands", [])
+
+# ---- Ensemble ----
+ENSEMBLE_CFG = CFG.get("ensemble", {})
+CRITICAL_HEALTH_THRESHOLD = ENSEMBLE_CFG.get("critical_health_threshold", 40)
 
 # =============================================================================
 # LOGGING
@@ -143,9 +259,15 @@ def read_csv_safe(path: str) -> pd.DataFrame:
     return pd.read_csv(path, low_memory=False)
 
 def ensure_dirs():
+    # First ensure base directories exist
+    for base_dir in [INTERMEDIATE_DIR, OUTPUT_DIR, LOG_DIR]:
+        os.makedirs(base_dir, exist_ok=True)
+    
+    # Then ensure subdirectories for each file
     for p in list(INTERMEDIATE_PATHS.values()) + list(OUTPUT_PATHS.values()):
         d = os.path.dirname(p)
-        os.makedirs(d, exist_ok=True)
+        if d:
+            os.makedirs(d, exist_ok=True)
 
 def convert_duration_minutes(series: pd.Series, logger: logging.Logger) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
@@ -163,6 +285,103 @@ def clean_equipment_type(series: pd.Series) -> pd.Series:
          .str.replace(" Ariza", "", regex=False)
          .str.strip()
     )
+def parse_date_safely(x):
+    if pd.isna(x):
+        return pd.NaT
+    try:
+        return pd.to_datetime(x, errors="coerce")
+    except Exception:
+        return pd.NaT
+def get_chronic_params(equipment_type: str):
+    """
+    Equipment-aware chronic parameters.
+    Falls back to global defaults if no override exists.
+    """
+    if isinstance(equipment_type, str) and equipment_type in CHRONIC_PER_TYPE:
+        cfg = CHRONIC_PER_TYPE[equipment_type]
+        return (
+            cfg.get("window_days", CHRONIC_WINDOW_DAYS_DEFAULT),
+            cfg.get("min_events", CHRONIC_MIN_EVENTS_DEFAULT),
+            CHRONIC_MIN_RATE_DEFAULT,
+        )
+
+    return (
+        CHRONIC_WINDOW_DAYS_DEFAULT,
+        CHRONIC_MIN_EVENTS_DEFAULT,
+        CHRONIC_MIN_RATE_DEFAULT,
+    )
+def compute_chronic_flag(
+    fault_dates: pd.Series,
+    equipment_type: str,
+    t_ref: pd.Timestamp,
+):
+    """
+    IEEE-style chronic detection with per-equipment override.
+    """
+    window_days, min_events, min_rate = get_chronic_params(equipment_type)
+
+    if fault_dates.empty:
+        return 0, 0, 0.0
+
+    window_start = t_ref - pd.Timedelta(days=window_days)
+    recent_faults = fault_dates[fault_dates >= window_start]
+
+    n_events = len(recent_faults)
+    rate_per_year = n_events / (window_days / 365.0)
+
+    is_chronic = int(
+        (n_events >= min_events) and (rate_per_year >= min_rate)
+    )
+
+    return is_chronic, n_events, rate_per_year
+def calculate_cof(customer_count: float) -> int:
+    """
+    Consequence of Failure based on customer impact bands.
+    """
+    if pd.isna(customer_count):
+        return 1  # Low / Unknown
+
+    for band in COF_BANDS:
+        if customer_count <= band["max_customers"]:
+            return band["cof"]
+
+    return 1
+def calculate_risk_level(pof_category: str, cof: int) -> str:
+    """
+    Rule-based risk classification (replaces static risk matrix).
+    """
+    if pof_category in ["High", "Very High"] and cof >= 3:
+        return "Critical"
+
+    if pof_category in ["High"] and cof == 2:
+        return "High"
+
+    if pof_category in ["Medium"] and cof >= 2:
+        return "Medium"
+
+    return "Low"
+def compute_health_score(mean_pof: float) -> float:
+    """
+    Converts mean PoF into customer-facing health score (0–100).
+    """
+    if pd.isna(mean_pof):
+        return 100.0
+
+    return float(np.clip(100.0 * (1.0 - mean_pof), 0, 100))
+def enrich_asset_risk_row(row: pd.Series) -> pd.Series:
+    """
+    Final enrichment applied row-wise to ensemble output.
+    """
+    pof_cat = categorize_pof(row.get("Mean_PoF"))
+    cof = calculate_cof(row.get("Musteri_Sayisi"))
+    risk = calculate_risk_level(pof_cat, cof)
+
+    row["PoF_Category"] = pof_cat
+    row["CoF"] = cof
+    row["Risk_Level"] = risk
+    row["Critical_Flag"] = int(row.get("Health_Score", 100) < CRITICAL_HEALTH_THRESHOLD)
+
+    return row
 
 def rename_maintenance_and_attributes(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
     col_map = {
@@ -597,7 +816,6 @@ def step02a_yapisal(equipment_master: pd.DataFrame, t_ref: pd.Timestamp, logger:
     df = equipment_master.copy()
 
     # Structural set: no fault-history used for survival.
-    # (Note: we keep Fault_Count etc. in master for reporting; but 02a output is safe.)
     keep_cols = ["cbs_id", "Ekipman_Tipi", "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka", "kVA_Rating",
                  "Sehir", "Ilce", "Mahalle", "Location_Known", "Musteri_Sayisi"]
 
@@ -610,9 +828,22 @@ def step02a_yapisal(equipment_master: pd.DataFrame, t_ref: pd.Timestamp, logger:
     for c in ["Gerilim_Seviyesi", "kVA_Rating", "Musteri_Sayisi"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
+            
+    # Fill missing kVA_Rating based on equipment type
+    if "kVA_Rating" in out.columns:
+        out.loc[(out["kVA_Rating"].isna()) & (out["Ekipman_Tipi"].str.contains("Trafo", na=False)), "kVA_Rating"] = 400.0
+        out.loc[(out["kVA_Rating"].isna()) & (out["Ekipman_Tipi"].str.contains("Pano", na=False)), "kVA_Rating"] = 50.0
+    
+    # Log what we have
+    logger.info(f"[STRUCTURAL] Created features with {len(out.columns)} columns for {len(out)} assets")
+    for col in out.columns:
+        if col not in ["cbs_id", "T_ref"]:
+            if out[col].dtype in [np.float64, np.int64]:
+                logger.info(f"  - {col}: numeric, {out[col].notna().sum()}/{len(out)} non-null")
+            else:
+                logger.info(f"  - {col}: categorical, {out[col].nunique()} unique values")
 
     return out
-
 
 # =============================================================================
 # STEP-02b: TEMPORAL/SNAPSHOT FEATURES (T_ref based)
@@ -671,44 +902,97 @@ def select_cox_safe_features(df_all: pd.DataFrame, structural_cols: list, logger
     }
     X = X.drop(columns=[c for c in X.columns if c in BLACKLIST], errors="ignore")
 
-    # Cox stabilite: numeric-only
-    X = X.select_dtypes(include=[np.number])
-
-    bad_cols = X.columns[X.isna().any() | np.isinf(X).any()].tolist()
+    logger.info(f"[COX] Starting with {len(X.columns)} structural columns")
+    
+    # Separate numeric and categorical
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = [c for c in X.columns if c not in numeric_cols]
+    
+    logger.info(f"[COX] Found {len(numeric_cols)} numeric, {len(categorical_cols)} categorical columns")
+    
+    # For categorical: one-hot encode with limited cardinality
+    if categorical_cols:
+        for col in categorical_cols[:]:  # Copy list to modify during iteration
+            n_unique = X[col].nunique()
+            if n_unique > 10:  # Too many categories
+                logger.warning(f"[COX] Dropping {col}: too many categories ({n_unique})")
+                categorical_cols.remove(col)
+                X = X.drop(columns=[col])
+            elif n_unique == 1:  # No variance
+                logger.warning(f"[COX] Dropping {col}: only one unique value")
+                categorical_cols.remove(col)
+                X = X.drop(columns=[col])
+    
+    # One-hot encode remaining categoricals
+    if categorical_cols:
+        logger.info(f"[COX] One-hot encoding {len(categorical_cols)} categorical columns")
+        X = pd.get_dummies(X, columns=categorical_cols, drop_first=True, dtype=float)
+    
+    # Now work with numeric columns only
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    
+    if not numeric_cols:
+        logger.error("[COX] No numeric columns after encoding!")
+        raise ValueError("No Cox-safe features left after initial processing.")
+    
+    # Clean numeric columns
+    bad_cols = []
+    for col in numeric_cols:
+        # Check for NaN/Inf
+        if X[col].isna().any() or np.isinf(X[col]).any():
+            # Try to fill
+            if X[col].isna().sum() < len(X) * 0.5:  # Less than 50% missing
+                X[col] = X[col].fillna(X[col].median())
+            else:
+                bad_cols.append(col)
+                continue
+        
+        # Check variance
+        if X[col].var() < 1e-6:
+            bad_cols.append(col)
+    
     if bad_cols:
-        logger.warning("[COX] Dropping NaN/Inf cols: %d", len(bad_cols))
+        logger.warning(f"[COX] Dropping {len(bad_cols)} columns: NaN/Inf/zero-variance")
         X = X.drop(columns=bad_cols)
 
-    if not X.empty:
-        var = X.var()
-        low = var[var < 1e-6].index.tolist()
-        if low:
-            logger.warning("[COX] Dropping near-zero variance cols: %d", len(low))
-            X = X.drop(columns=low)
-
-    if X.empty:
-        raise ValueError("No Cox-safe features left.")
+    # Final check
+    remaining = X.select_dtypes(include=[np.number]).columns.tolist()
+    logger.info(f"[COX] Final feature set: {len(remaining)} columns")
+    
+    if len(remaining) == 0:
+        logger.error("[COX] All features filtered out. Available structural_cols were:")
+        logger.error(f"  {structural_cols[:10]}...")  # Show first 10
+        raise ValueError("No Cox-safe features left after all filters.")
+    
     return X
-
 def conditional_pof_from_survival(S_age: np.ndarray, S_age_h: np.ndarray) -> np.ndarray:
     eps = 1e-12
     ratio = (S_age_h + eps) / (S_age + eps)
     return 1.0 - np.clip(ratio, 0.0, 1.0)
 
-def train_cox_weibull(df_all: pd.DataFrame, X_cols: list, logger: logging.Logger):
+def train_cox_weibull(X_transformed: pd.DataFrame, duration: pd.Series, event: pd.Series, logger: logging.Logger):
+    """
+    Train Cox and Weibull models on pre-transformed features.
+    
+    Args:
+        X_transformed: Already one-hot encoded feature matrix
+        duration: duration_days series
+        event: event indicator series
+        logger: logger instance
+    """
     if not LIFELINES_OK:
         logger.warning("[SKIP] lifelines yok -> Cox/Weibull atlandı")
         return None, None
 
-    work = df_all[X_cols].copy()
-    work["duration_days"] = df_all["duration_days"].values
-    work["event"] = df_all["event"].values
+    work = X_transformed.copy()
+    work["duration_days"] = duration.values
+    work["event"] = event.values
 
-    # numeric fill
+    # Ensure all numeric
     work = work.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     train_idx, test_idx = train_test_split(
-        np.arange(len(work)), test_size=0.25, random_state=42, stratify=df_all["event"].values
+        np.arange(len(work)), test_size=0.25, random_state=42, stratify=event.values
     )
     train = work.iloc[train_idx].copy()
     test = work.iloc[test_idx].copy()
@@ -739,14 +1023,16 @@ def train_cox_weibull(df_all: pd.DataFrame, X_cols: list, logger: logging.Logger
         wb = None
 
     return cox, wb
-
-def predict_lifelines_conditional_pof(df_all: pd.DataFrame, model, X_cols: list, horizons_days: list, model_name: str) -> pd.DataFrame:
-    Xd = df_all[X_cols].copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
+def predict_lifelines_conditional_pof(X_transformed: pd.DataFrame, duration: pd.Series, model, horizons_days: list, model_name: str, cbs_ids: pd.Series) -> pd.DataFrame:
+    """
+    Predict conditional PoF using pre-transformed features.
+    """
+    Xd = X_transformed.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     # conditional PoF based on duration_days (observed survival time)
-    age = df_all["duration_days"].fillna(0).clip(lower=0).values.astype(float)
+    age = duration.fillna(0).clip(lower=0).values.astype(float)
 
-    out = pd.DataFrame({"cbs_id": df_all["cbs_id"].values})
+    out = pd.DataFrame({"cbs_id": cbs_ids.values})
     for H in horizons_days:
         label = SURVIVAL_HORIZON_LABELS.get(H, f"{H}g")
 
@@ -952,12 +1238,6 @@ def compute_cof(row: pd.Series) -> str:
         return "High"
     return "Medium"
 
-def apply_risk_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["PoF_Seviye"] = out["Mean_PoF"].apply(categorize_pof)
-    out["CoF_Seviye"] = out.apply(compute_cof, axis=1)
-    out["Risk_Seviye"] = out.apply(lambda r: RISK_MATRIX[r["PoF_Seviye"]][r["CoF_Seviye"]], axis=1)
-    return out
 
 
 # =============================================================================
@@ -1007,7 +1287,9 @@ def main():
 
     # persist step-01 outputs
     fault_events.to_csv(INTERMEDIATE_PATHS["fault_events_clean"], index=False, encoding="utf-8-sig")
-    df_healthy.to_csv(INTERMEDIATE_PATHS["healthy_equipment_clean"], index=False, encoding="utf-8-sig")
+    # To check if key exists first:
+    if "healthy_equipment_clean" in INTERMEDIATE_PATHS:
+        df_healthy.to_csv(INTERMEDIATE_PATHS["healthy_equipment_clean"], index=False, encoding="utf-8-sig")
     equipment_master.to_csv(INTERMEDIATE_PATHS["equipment_master"], index=False, encoding="utf-8-sig")
     survival_base.to_csv(INTERMEDIATE_PATHS["survival_base"], index=False, encoding="utf-8-sig")
 
@@ -1051,14 +1333,81 @@ def main():
     df_all = survival_base.copy()
     df_all["cbs_id"] = df_all["cbs_id"].astype(str).str.lower().str.strip()
     features_all["cbs_id"] = features_all["cbs_id"].astype(str).str.lower().str.strip()
+
+    # Drop overlapping columns from survival_base before merge (keep only survival-specific)
+    survival_cols_to_keep = ["cbs_id", "event", "duration_days", "Kurulum_Tarihi", 
+                            "Fault_Count", "Ilk_Ariza_Tarihi", "Son_Ariza_Tarihi",
+                            "Ekipman_Yasi_Gun", "Ariza_Gecmisi"]
+    survival_cols_to_keep = [c for c in survival_cols_to_keep if c in df_all.columns]
+    df_all = df_all[survival_cols_to_keep]
+
+    # Now merge - no more _x and _y suffixes!
     df_all = df_all.merge(features_all, on="cbs_id", how="left")
 
+    logger.info(f"[DEBUG] After clean merge, df_all columns: {list(df_all.columns[:20])}...")
+
     # define scopes
-    structural_cols = [c for c in x_struct.columns if c not in ["cbs_id", "T_ref"]]
-    temporal_cols = [c for c in x_temp.columns if c not in ["cbs_id", "Kurulum_Tarihi", "T_ref"]]
+    if "T_ref" in x_struct.columns:
+        x_struct = x_struct.drop(columns=["T_ref"])
+    if "T_ref" in x_temp.columns:
+        x_temp = x_temp.drop(columns=["T_ref"])
+
+    structural_cols = [c for c in x_struct.columns if c not in ["cbs_id"]]
+    temporal_cols = [c for c in x_temp.columns if c not in ["cbs_id", "Kurulum_Tarihi"]]
+
+    logger.info(f"[DEBUG] x_struct columns: {list(x_struct.columns)}")
+    logger.info(f"[DEBUG] x_temp columns: {list(x_temp.columns)}")
+    logger.info(f"[DEBUG] structural_cols: {structural_cols}")
+    logger.info(f"[DEBUG] temporal_cols: {temporal_cols}")
 
     preds = pd.DataFrame({"cbs_id": df_all["cbs_id"].values})
 
+    # Survival: Cox/Weibull using strict Cox-safe numeric
+# Survival: Cox/Weibull using strict Cox-safe numeric
+    if LIFELINES_OK:
+        X_cox = select_cox_safe_features(df_all, structural_cols, logger)
+        
+        # Train with transformed features
+        cox, wb = train_cox_weibull(X_cox, df_all["duration_days"], df_all["event"], logger)
+
+        if cox is not None:
+            cox_pred = predict_lifelines_conditional_pof(
+                X_cox, df_all["duration_days"], cox, 
+                SURVIVAL_HORIZONS_DAYS, "cox", df_all["cbs_id"]
+            )
+            preds = preds.merge(cox_pred, on="cbs_id", how="left")
+            # Save individual horizon files...
+            
+        if wb is not None:
+            wb_pred = predict_lifelines_conditional_pof(
+                X_cox, df_all["duration_days"], wb,
+                SURVIVAL_HORIZONS_DAYS, "weibull", df_all["cbs_id"]
+            )
+            preds = preds.merge(wb_pred, on="cbs_id", how="left")
+        # ... rest of cox code
+    # Around line 1330 in main(), add these debug lines:
+    logger.info(f"[DEBUG] x_struct columns: {list(x_struct.columns)}")
+    logger.info(f"[DEBUG] x_temp columns: {list(x_temp.columns)}")
+    logger.info(f"[DEBUG] structural_cols: {structural_cols}")
+    logger.info(f"[DEBUG] df_all columns: {list(df_all.columns)}")
+    # Around line 1327-1330, replace with:
+    # define scopes
+    if "T_ref" in x_struct.columns:
+        x_struct = x_struct.drop(columns=["T_ref"])
+    if "T_ref" in x_temp.columns:
+        x_temp = x_temp.drop(columns=["T_ref"])
+
+    structural_cols = [c for c in x_struct.columns if c not in ["cbs_id"]]
+    temporal_cols = [c for c in x_temp.columns if c not in ["cbs_id", "Kurulum_Tarihi"]]
+
+    logger.info(f"[DEBUG] Structural features: {structural_cols}")
+    logger.info(f"[DEBUG] Temporal features: {temporal_cols}")
+
+    preds = pd.DataFrame({"cbs_id": df_all["cbs_id"].values})
+
+    # Survival: Cox/Weibull using strict Cox-safe numeric
+    if LIFELINES_OK:
+        X_cox = select_cox_safe_features(df_all, structural_cols, logger)
     # Survival: Cox/Weibull using strict Cox-safe numeric
     if LIFELINES_OK:
         X_cox = select_cox_safe_features(df_all, structural_cols, logger)
@@ -1128,7 +1477,7 @@ def main():
     ] if c in df_all.columns]
 
     report = df_all[["cbs_id"] + report_cols].drop_duplicates("cbs_id").merge(scored, on="cbs_id", how="left")
-    report = apply_risk_matrix(report)
+
 
     out_path = os.path.join(os.path.dirname(list(OUTPUT_PATHS.values())[0]), "ensemble_pof_final.csv")
     report.to_csv(out_path, index=False, encoding="utf-8-sig")

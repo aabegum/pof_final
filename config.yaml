@@ -2,54 +2,59 @@
 # PoF3 Final Configuration (YAML)
 # =======================================
 
+# ============================
+# PATHS
+# ============================
 paths:
-  data_dir: "data"
-  input_dir: "data/girdiler"
-  intermediate_dir: "data/ara_ciktilar"
-  output_dir: "data/sonuclar"
-  logs_dir: "loglar"
-  visuals_dir: "gorseller"
+  data:
+    base: data
+    input: data/girdiler
+    intermediate: data/ara_ciktilar
+    output: data/sonuclar
+    logs: loglar
 
-inputs:
-  fault_data: "data/girdiler/ariza_final.xlsx"
-  healthy_data: "data/girdiler/saglam_final.xlsx"
+data_paths:
+  fault_data: data/girdiler/ariza_final.xlsx
+  healthy_data: data/girdiler/saglam_final.xlsx
 
-outputs:
-  fault_events_clean: "data/ara_ciktilar/fault_events_clean.csv"
-  healthy_equipment_clean: "data/ara_ciktilar/healthy_equipment_clean.csv"
-  equipment_master: "data/ara_ciktilar/equipment_master.csv"
-  survival_base: "data/ara_ciktilar/survival_base.csv"
-  analysis_metadata: "data/ara_ciktilar/analysis_metadata.json"
+intermediate_paths:
+  fault_events_clean: data/ara_ciktilar/fault_events_clean.csv
+  healthy_equipment_clean: data/ara_ciktilar/healthy_equipment_clean.csv
+  equipment_master: data/ara_ciktilar/equipment_master.csv
+  survival_base: data/ara_ciktilar/survival_base.csv
+  features_structural: data/ara_ciktilar/ozellikler_yapisal.csv
+  features_temporal: data/ara_ciktilar/ozellikler_zamansal.csv
+  ozellikler_pof3: data/ara_ciktilar/ozellikler_pof3.csv
 
-  features_structural: "data/ara_ciktilar/ozellikler_yapisal.csv"
-  features_temporal: "data/ara_ciktilar/ozellikler_zamansal.csv"
-  features_merged: "data/ara_ciktilar/ozellikler_pof3.csv"
+output_paths:
+  ariza_kayitlari: data/sonuclar/ariza_kayitlari.csv
+  ekipman_listesi: data/sonuclar/ekipman_listesi.csv
+  sagkalim_taban: data/sonuclar/sagkalim_taban.csv
+  saglam_ekipman_listesi: data/sonuclar/saglam_ekipman_listesi.csv
+  chronic_summary: data/sonuclar/chronic_equipment_summary.csv
+  chronic_only: data/sonuclar/chronic_equipment_only.csv
+  cox_3ay: data/sonuclar/cox_sagkalim_3ay_ariza_olasiligi.csv
+  cox_6ay: data/sonuclar/cox_sagkalim_6ay_ariza_olasiligi.csv
+  cox_12ay: data/sonuclar/cox_sagkalim_12ay_ariza_olasiligi.csv
+  cox_24ay: data/sonuclar/cox_sagkalim_24ay_ariza_olasiligi.csv
+  rsf_3ay: data/sonuclar/rsf_sagkalim_3ay_ariza_olasiligi.csv
+  rsf_6ay: data/sonuclar/rsf_sagkalim_6ay_ariza_olasiligi.csv
+  rsf_12ay: data/sonuclar/rsf_sagkalim_12ay_ariza_olasiligi.csv
+  rsf_24ay: data/sonuclar/rsf_sagkalim_24ay_ariza_olasiligi.csv
+  ensemble: data/sonuclar/ensemble_pof_final.csv
+  final_risk_report_xlsx: data/sonuclar/FINAL_ASSET_RISK_REPORT.xlsx
 
-  cox_3ay: "data/sonuclar/cox_sagkalim_3ay_ariza_olasiligi.csv"
-  cox_6ay: "data/sonuclar/cox_sagkalim_6ay_ariza_olasiligi.csv"
-  cox_12ay: "data/sonuclar/cox_sagkalim_12ay_ariza_olasiligi.csv"
-  cox_24ay: "data/sonuclar/cox_sagkalim_24ay_ariza_olasiligi.csv"
+# ============================
+# ANALYSIS
+# ============================
+analysis:
+  min_equipment_per_class: 30
+  require_install_before_data_end: true
+  analysis_metadata_path: data/ara_ciktilar/analysis_metadata.json
 
-  rsf_3ay: "data/sonuclar/rsf_sagkalim_3ay_ariza_olasiligi.csv"
-  rsf_6ay: "data/sonuclar/rsf_sagkalim_6ay_ariza_olasiligi.csv"
-  rsf_12ay: "data/sonuclar/rsf_sagkalim_12ay_ariza_olasiligi.csv"
-  rsf_24ay: "data/sonuclar/rsf_sagkalim_24ay_ariza_olasiligi.csv"
-
-  leakage_free_ml_pof: "data/sonuclar/leakage_free_ml_pof.csv"
-  ensemble_pof_final: "data/sonuclar/ensemble_pof_final.csv"
-
-  chronic_summary: "data/sonuclar/chronic_equipment_summary.csv"
-  chronic_only: "data/sonuclar/chronic_equipment_only.csv"
-
-  final_risk_report_xlsx: "data/sonuclar/FINAL_ASSET_RISK_REPORT.xlsx"
-
-# -----------------------------
-# PoF definition + horizons
-# -----------------------------
-pof_definition: >
-  Probability that an asset will experience a physical failure within the next H days,
-  conditional on being operational at T_ref (DATA_END_DATE).
-
+# ============================
+# SURVIVAL ANALYSIS
+# ============================
 survival:
   horizons_days: [90, 180, 365, 730]
   horizon_labels:
@@ -58,55 +63,41 @@ survival:
     365: "12ay"
     730: "24ay"
 
-data_contract:
-  cbs_id_lowercase: true
-  require_install_before_data_end: true
-  min_equipment_per_class: 30
-  min_fault_span_years: 2.0
+pof_definition: >
+  Probability that an asset will experience a physical failure within the next H days,
+  conditional on being operational at T_ref (DATA_END_DATE).
 
-geo_mapping:
-  extra_fault_cols:
-    - "KOORDINAT_X"
-    - "KOORDINAT_Y"
-    - "İl"
-    - "İlçe"
-    - "Mahalle"
-    - "total customer count"
-    - "urban mv"
-    - "urban lv"
-    - "rural mv"
-    - "rural lv"
-    - "suburban mv"
-    - "suburban lv"
-  rename:
-    "KOORDINAT_X": "Longitude"
-    "KOORDINAT_Y": "Latitude"
-    "İl": "Sehir"
-    "İlçe": "Ilce"
-    "Mahalle": "Mahalle"
-    "total customer count": "Musteri_Sayisi"
-
+# ============================
+# CHRONIC EQUIPMENT
+# ============================
 chronic:
-  # Global defaults (equipment-specific override yapılabilir)
   window_days_default: 90
   min_events_default: 3
   min_rate_per_year_default: 1.5
-  # Optional per equipment type overrides:
+  # Equipment-specific overrides:
   per_type:
     Sigorta: { window_days: 90, min_events: 3 }
     Hat:     { window_days: 180, min_events: 2 }
     Trafo:   { window_days: 365, min_events: 2 }
 
+# ============================
+# MACHINE LEARNING
+# ============================
 ml:
   enabled: true
   models: ["XGBoost", "CatBoost"]
   test_size: 0.25
   random_state: 42
 
+# ============================
+# ENSEMBLE & HEALTH SCORE
+# ============================
 ensemble:
-  # Mean PoF üzerinden health-score (0–100)
   critical_health_threshold: 40
 
+# ============================
+# RISK ASSESSMENT
+# ============================
 risk:
   pof_thresholds:
     Low: 0.25
@@ -114,10 +105,84 @@ risk:
     High: 0.75
     Very High: 1.00
 
-  # Basit CoF (müşteri sayısı temelli) — istersen büyütürüz
   cof_bands:
     - { max_customers: 0,   cof: 1, label: "Low/Unknown" }
     - { max_customers: 50,  cof: 1, label: "Low" }
     - { max_customers: 200, cof: 2, label: "Medium" }
     - { max_customers: 1000, cof: 3, label: "High" }
     - { max_customers: 999999999, cof: 4, label: "Critical" }
+
+  risk_matrix:
+    Low:
+      Low: Low
+      Medium: Low
+      High: Medium
+      Critical: Medium
+    Medium:
+      Low: Low
+      Medium: Medium
+      High: High
+      Critical: High
+    High:
+      Low: Medium
+      Medium: High
+      High: High
+      Critical: Critical
+    Very_High:
+      Low: Medium
+      Medium: High
+      High: Critical
+      Critical: Critical
+
+# ============================
+# DATA CONTRACT
+# ============================
+data_contract:
+  cbs_id_lowercase: true
+  require_install_before_data_end: true
+  min_equipment_per_class: 30
+  min_fault_span_years: 2.0
+
+# ============================
+# FAULT COLUMNS MAPPING
+# ============================
+fault_columns:
+  extra_fault_cols:
+    - KOORDINAT_X
+    - KOORDINAT_Y
+    - İl
+    - İlçe
+    - Mahalle
+    - total customer count
+
+  column_mapping:
+    KOORDINAT_X: Longitude
+    KOORDINAT_Y: Latitude
+    İl: Sehir
+    İlçe: Ilce
+    total customer count: Musteri_Sayisi
+
+# ============================
+# GEO MAPPING (Extended)
+# ============================
+geo_mapping:
+  extra_fault_cols:
+    - KOORDINAT_X
+    - KOORDINAT_Y
+    - İl
+    - İlçe
+    - Mahalle
+    - total customer count
+    - urban mv
+    - urban lv
+    - rural mv
+    - rural lv
+    - suburban mv
+    - suburban lv
+  rename:
+    KOORDINAT_X: Longitude
+    KOORDINAT_Y: Latitude
+    İl: Sehir
+    İlçe: Ilce
+    Mahalle: Mahalle
+    total customer count: Musteri_Sayisi
