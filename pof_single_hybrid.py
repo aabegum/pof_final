@@ -110,65 +110,25 @@ from scipy import stats
 
 
 # =============================================================================
-# CONFIG (projedeki config.config ile uyumlu)
+# CONFIG - DEDUPLICATED
 # =============================================================================
-# ============================
-# CONFIG BINDING (YAML → PY)
-# ============================
-# Around line 122, replace with:
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Around line 122, replace with:
-OUTPUT_PATHS = {
-    k: os.path.join(BASE_DIR, v) if not os.path.isabs(v) else v
-    for k, v in CFG.get("output_paths", {}).items()
-}
-logger = logging.getLogger("pof3_tum_adimlar")
-print("DEBUG OUTPUT_PATHS keys:", list(OUTPUT_PATHS.keys()))
-print("DEBUG OUTPUT_PATHS sample:", {k: OUTPUT_PATHS[k] for k in list(OUTPUT_PATHS.keys())[:3]})
-# ----------------------------
-# LOAD YAML CONFIG
-# ----------------------------
-with open(os.path.join(BASE_DIR, "config.yaml"), "r", encoding="utf-8") as f:
-    CFG = yaml.safe_load(f)
-
-# ----------------------------
-# PATH RESOLUTION
-# ----------------------------
-DATA_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["base"])
-INPUT_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["input"])
-INTERMEDIATE_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["intermediate"])
-OUTPUT_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["output"])
-LOG_DIR = os.path.join(BASE_DIR, CFG["paths"]["data"]["logs"])
-
 # Build full paths for data files
 DATA_PATHS = {
     k: os.path.join(BASE_DIR, v)
     for k, v in CFG["data_paths"].items()
 }
 
-# Build full paths for intermediate files
-INTERMEDIATE_PATHS = {
-    k: os.path.join(BASE_DIR, v)
-    for k, v in CFG["intermediate_paths"].items()
-}
-
-# Build full paths for output files
-OUTPUT_PATHS = {
-    k: os.path.join(BASE_DIR, v)
-    for k, v in CFG["output_paths"].items()
-}
-
-SURVIVAL_HORIZONS_DAYS = CFG["survival"]["horizons_days"]
-SURVIVAL_HORIZON_LABELS = CFG["survival"]["horizon_labels"]
-
 MIN_EQUIPMENT_PER_CLASS = CFG["analysis"]["min_equipment_per_class"]
 REQUIRE_INSTALL_BEFORE_DATA_END = CFG["analysis"]["require_install_before_data_end"]
 ANALYSIS_METADATA_PATH = os.path.join(BASE_DIR, CFG["analysis"]["analysis_metadata_path"])
 
 CHRONIC_CFG = CFG.get("chronic", {})
-CHRONIC_WINDOW_DAYS_DEFAULT = CHRONIC_CFG.get("window_days_default", 90)
-CHRONIC_MIN_EVENTS_DEFAULT = CHRONIC_CFG.get("min_events_default", 3)
-CHRONIC_MIN_RATE_DEFAULT = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
+CHRONIC_WINDOW_DAYS = CHRONIC_CFG.get("window_days_default", 90)
+CHRONIC_WINDOW_DAYS_DEFAULT = CHRONIC_WINDOW_DAYS
+CHRONIC_THRESHOLD_EVENTS = CHRONIC_CFG.get("min_events_default", 3)
+CHRONIC_MIN_EVENTS_DEFAULT = CHRONIC_THRESHOLD_EVENTS
+CHRONIC_MIN_RATE = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
+CHRONIC_MIN_RATE_DEFAULT = CHRONIC_MIN_RATE
 CHRONIC_PER_TYPE = CHRONIC_CFG.get("per_type", {})
 
 RISK_CFG = CFG.get("risk", {})
@@ -180,50 +140,6 @@ CRITICAL_HEALTH_THRESHOLD = ENSEMBLE_CFG.get("critical_health_threshold", 40)
 
 EXTRA_FAULT_COLS = CFG.get("fault_columns", {}).get("extra_fault_cols", [])
 COLUMN_MAPPING = CFG.get("fault_columns", {}).get("column_mapping", {})
-logger = logging.getLogger("pof3_tum_adimlar")
-print("DEBUG OUTPUT_PATHS keys:", list(OUTPUT_PATHS.keys()))
-print("DEBUG OUTPUT_PATHS sample:", {k: OUTPUT_PATHS[k] for k in list(OUTPUT_PATHS.keys())[:3]})
-MIN_EQUIPMENT_PER_CLASS = CFG["analysis"]["min_equipment_per_class"]
-REQUIRE_INSTALL_BEFORE_DATA_END = CFG["analysis"]["require_install_before_data_end"]
-ANALYSIS_METADATA_PATH = CFG["analysis"]["analysis_metadata_path"]
-
-CHRONIC_CFG = CFG["chronic"]
-
-CHRONIC_WINDOW_DAYS = CHRONIC_CFG.get("window_days_default", 90)
-CHRONIC_THRESHOLD_EVENTS = CHRONIC_CFG.get("min_events_default", 3)
-CHRONIC_MIN_RATE = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
-
-CHRONIC_PER_TYPE = CHRONIC_CFG.get("per_type", {})
-
-
-POF_THRESHOLDS = CFG["risk"]["pof_thresholds"]
-RISK_CFG = CFG.get("risk", {})
-POF_THRESHOLDS = RISK_CFG.get("pof_thresholds", {})
-COF_BANDS = RISK_CFG.get("cof_bands", [])
-
-
-EXTRA_FAULT_COLS = CFG["fault_columns"]["extra_fault_cols"]
-COLUMN_MAPPING = CFG["fault_columns"]["column_mapping"]
-
-
-# ---- Chronic config ----
-CHRONIC_CFG = CFG.get("chronic", {})
-
-CHRONIC_WINDOW_DAYS_DEFAULT = CHRONIC_CFG.get("window_days_default", 90)
-CHRONIC_MIN_EVENTS_DEFAULT = CHRONIC_CFG.get("min_events_default", 3)
-CHRONIC_MIN_RATE_DEFAULT   = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
-
-CHRONIC_PER_TYPE = CHRONIC_CFG.get("per_type", {})
-
-# ---- Risk config ----
-RISK_CFG = CFG.get("risk", {})
-
-POF_THRESHOLDS = RISK_CFG.get("pof_thresholds", {})
-COF_BANDS = RISK_CFG.get("cof_bands", [])
-
-# ---- Ensemble ----
-ENSEMBLE_CFG = CFG.get("ensemble", {})
-CRITICAL_HEALTH_THRESHOLD = ENSEMBLE_CFG.get("critical_health_threshold", 40)
 
 # =============================================================================
 # LOGGING
@@ -241,13 +157,15 @@ def setup_logger() -> logging.Logger:
     fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(fh)
 
-    ch = logging.StreamHandler(sys.stdout)
+    # Use UTF-8 encoding for console handler on Windows
+    import io
+    ch = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace'))
     ch.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(ch)
 
-    logger.info("📝 [DEBUG] LOG FILE: %s", log_path)
+    logger.info("[DEBUG] LOG FILE: %s", log_path)
     logger.info("=" * 80)
-    logger.info("PoF3 - Tüm Adımlar Tek Script (01→05) | Hybrid FINAL")
+    logger.info("PoF3 - Tum Adimlar Tek Script (01-05) | Hybrid FINAL")
     logger.info("=" * 80)
     return logger
 
@@ -274,7 +192,7 @@ def convert_duration_minutes(series: pd.Series, logger: logging.Logger) -> pd.Se
     med = s.median()
     logger.info(f"[INFO] Süre medyanı (ham): {med}")
     if pd.notna(med) and med > 10000:
-        logger.info("[INFO] Süreler milisaniye → dakikaya dönüşüyor.")
+        logger.info("[INFO] Sureler milisaniye -> dakikaya donusuyor.")
         return s / 60000.0
     return s
 
@@ -289,7 +207,7 @@ def parse_date_safely(x):
     if pd.isna(x):
         return pd.NaT
     try:
-        return pd.to_datetime(x, errors="coerce")
+        return pd.to_datetime(x, errors="coerce", dayfirst=True)
     except Exception:
         return pd.NaT
 def get_chronic_params(equipment_type: str):
@@ -432,7 +350,7 @@ def detect_duration_outliers(df: pd.DataFrame, logger: logging.Logger, output_di
     upper_limit_min = np.expm1(upper_limit_log)
     logger.info("[OUTLIER] Robust log-normal check:")
     logger.info("  - Median Duration: %.1f min", float(np.expm1(median_log)))
-    logger.info("  - Upper Cutoff (6σ): %.1f min (%.1f days)", float(upper_limit_min), float(upper_limit_min/60/24))
+    logger.info("  - Upper Cutoff (6-sigma): %.1f min (%.1f days)", float(upper_limit_min), float(upper_limit_min/60/24))
 
     outlier_mask = log_durations > upper_limit_log
     n_outliers = int(outlier_mask.sum())
@@ -1130,12 +1048,15 @@ def train_ml_from_install(df_all: pd.DataFrame, feature_cols: list, horizons_day
     safe_cols = [c for c in feature_cols if c in df_all.columns and c not in blacklist]
     X = df_all[safe_cols].copy()
 
+    # Fill NaN in categorical columns to ensure consistency
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = X[col].fillna('Unknown')
+
     ydf = make_targets_from_install(df_all, horizons_days)
 
     models = {}  # (model_name, horizon_label) -> fitted pipeline
     perf = []
-
-    pre = build_preprocessor(X)
 
     for H in horizons_days:
         label = SURVIVAL_HORIZON_LABELS.get(H, f"{H}g")
@@ -1148,6 +1069,9 @@ def train_ml_from_install(df_all: pd.DataFrame, feature_cols: list, horizons_day
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.25, random_state=42, stratify=y
         )
+
+        # Build preprocessor for each horizon to ensure consistency
+        pre = build_preprocessor(X)
 
         if XGB_OK:
             xgb = XGBClassifier(
@@ -1179,7 +1103,18 @@ def train_ml_from_install(df_all: pd.DataFrame, feature_cols: list, horizons_day
     return {"models": models, "perf": perf, "safe_cols": safe_cols}
 
 def predict_ml_from_install(df_all: pd.DataFrame, ml_pack: dict, horizons_days: list) -> pd.DataFrame:
+    # Ensure all required columns exist with proper types
     X = df_all[ml_pack["safe_cols"]].copy()
+
+    # Ensure consistent column types as during training
+    for col in X.columns:
+        if X[col].dtype == 'object' and col != 'cbs_id':
+            # Fill NaN in categorical columns
+            X[col] = X[col].fillna('Unknown')
+        elif pd.api.types.is_numeric_dtype(X[col]):
+            # Keep numeric as-is (preprocessor will handle imputation)
+            pass
+
     out = pd.DataFrame({"cbs_id": df_all["cbs_id"].values})
 
     for H in horizons_days:
@@ -1408,13 +1343,13 @@ def main():
     # Survival: Cox/Weibull using strict Cox-safe numeric
     if LIFELINES_OK:
         X_cox = select_cox_safe_features(df_all, structural_cols, logger)
-    # Survival: Cox/Weibull using strict Cox-safe numeric
-    if LIFELINES_OK:
-        X_cox = select_cox_safe_features(df_all, structural_cols, logger)
-        cox, wb = train_cox_weibull(df_all, X_cox.columns.tolist(), logger)
+        cox, wb = train_cox_weibull(X_cox, df_all["duration_days"], df_all["event"], logger)
 
         if cox is not None:
-            cox_pred = predict_lifelines_conditional_pof(df_all, cox, X_cox.columns.tolist(), SURVIVAL_HORIZONS_DAYS, "cox")
+            cox_pred = predict_lifelines_conditional_pof(
+                X_cox, df_all["duration_days"], cox,
+                SURVIVAL_HORIZONS_DAYS, "cox", df_all["cbs_id"]
+            )
             preds = preds.merge(cox_pred, on="cbs_id", how="left")
             for H in SURVIVAL_HORIZONS_DAYS:
                 label = SURVIVAL_HORIZON_LABELS.get(H, f"{H}g")
@@ -1423,9 +1358,11 @@ def main():
                 if key in OUTPUT_PATHS and col in cox_pred.columns:
                     cox_pred[["cbs_id", col]].rename(columns={col: "PoF"}).to_csv(OUTPUT_PATHS[key], index=False, encoding="utf-8-sig")
 
-        # Weibull çıktısını da istersen ayrıca dosyalayabilirsin (config’te path yoksa sadece pred tabloya ekliyoruz)
         if wb is not None:
-            wb_pred = predict_lifelines_conditional_pof(df_all, wb, X_cox.columns.tolist(), SURVIVAL_HORIZONS_DAYS, "weibull")
+            wb_pred = predict_lifelines_conditional_pof(
+                X_cox, df_all["duration_days"], wb,
+                SURVIVAL_HORIZONS_DAYS, "weibull", df_all["cbs_id"]
+            )
             preds = preds.merge(wb_pred, on="cbs_id", how="left")
 
     else:
