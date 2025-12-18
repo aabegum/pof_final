@@ -49,285 +49,8 @@ from typing import Tuple
 
 
 # =============================================================================
-# TEMPORAL SPLIT UTILITY (Add this to imports section)
-# =============================================================================
-def temporal_train_test_split(
-    df: pd.DataFrame,
-    test_size: float = 0.25,
-    logger: logging.Logger = None
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Temporal train/test split based on installation date.
-    PREVENTS FUTURE LEAKAGE.
-    """
-    if "Kurulum_Tarihi" not in df.columns:
-        raise ValueError("Temporal split requires 'Kurulum_Tarihi' column")
-    
-    df_sorted = df.sort_values("Kurulum_Tarihi").reset_index(drop=True)
-    cutoff_date = df_sorted["Kurulum_Tarihi"].quantile(1 - test_size)
-    
-    train_mask = df_sorted["Kurulum_Tarihi"] <= cutoff_date
-    test_mask = ~train_mask
-    
-    train_idx = df_sorted[train_mask].index.values
-    test_idx = df_sorted[test_mask].index.values
-    
-    if logger:
-        logger.info(f"[TEMPORAL SPLIT] Cutoff: {cutoff_date.date()}")
-        logger.info(f"[TEMPORAL SPLIT] Train: {len(train_idx)} ({100*df.loc[train_idx, 'event'].mean():.1f}% events)")
-        logger.info(f"[TEMPORAL SPLIT] Test:  {len(test_idx)} ({100*df.loc[test_idx, 'event'].mean():.1f}% events)")
-    
-    return train_idx, test_idx
-
-
-# =============================================================================
-# PATCH 1: train_cox_weibull (REPLACE EXISTING)
-# =============================================================================
-def train_cox_weibull(X_transformed: pd.DataFrame, duration: pd.Series, event: pd.Series, logger: logging.Logger):
-    """
-    ✅ FIXED: Uses temporal split instead of random split
-    """
-    from lifelines import CoxPHFitter, WeibullAFTFitter
-    from lifelines.utils import concordance_index
-    
-    if not LIFELINES_OK:
-        logger.warning("[SKIP] lifelines not available")
-        return None, None
-
-    work = X_transformed.copy()
-    work["duration_days"] = duration.values
-    work["event"] = event.values
-    work["Kurulum_Tarihi"] = pd.to_datetime("2020-01-01") + pd.to_timedelta(duration.values, unit="D")  # Proxy
-    
-    work = work.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
-    # ✅ CHANGED: Random → Temporal
-    try:
-        train_idx, test_idx = temporal_train_test_split(work, test_size=0.25, logger=logger)
-    except Exception as e:
-        logger.warning(f"[COX] Temporal split failed ({e}), falling back to random")
-        from sklearn.model_selection import train_test_split
-        train_idx, test_idx = train_test_split(
-            np.arange(len(work)), test_size=0.25, random_state=42, stratify=event.values
-        )
-    
-    train = work.iloc[train_idx].copy()
-    test = work.iloc[test_idx].copy()
-
-    cox = None
-    wb = None
-
-    try:
-        cox = CoxPHFitter(penalizer=0.05)
-        logger.info("[COX] Training with TEMPORAL validation...")
-        cox.fit(train, duration_col="duration_days", event_col="event")
-        test_scores = cox.predict_partial_hazard(test)
-        c_ind = concordance_index(test["duration_days"], -test_scores, test["event"])
-        logger.info("[COX] Test Concordance (TEMPORAL): %.4f", c_ind)
-    except Exception as e:
-        logger.error("[COX] Failed: %s", e)
-        cox = None
-
-    try:
-        wb = WeibullAFTFitter(penalizer=0.05)
-        logger.info("[WEIBULL] Training with TEMPORAL validation...")
-        wb.fit(train, duration_col="duration_days", event_col="event")
-        wb_pred = wb.predict_median(test)
-        wb_cind = concordance_index(test["duration_days"], wb_pred, test["event"])
-        logger.info("[WEIBULL] Test Concordance (TEMPORAL): %.4f", wb_cind)
-    except Exception as e:
-        logger.error("[WEIBULL] Failed: %s", e)
-        wb = None
-
-    return cox, wb
-
-
-# =============================================================================
-# PATCH 2: train_rsf_survival (REPLACE EXISTING)
-# =============================================================================
-def train_rsf_survival(df_all: pd.DataFrame, structural_cols: list, logger: logging.Logger):
-    """
-    ✅ FIXED: Uses temporal split instead of random split
-    """
-    from sksurv.ensemble import RandomSurvivalForest
-    from sksurv.util import Surv
-    from sksurv.metrics import concordance_index_censored
-    from sklearn.pipeline import Pipeline
-    
-    if not SKSURV_OK:
-        logger.warning("[SKIP] sksurv not available")
-        return None
-
-    cols = [c for c in structural_cols if c in df_all.columns]
-    X = df_all[cols].copy()
-    pre = build_preprocessor(X)
-
-    y = Surv.from_arrays(
-        event=df_all["event"].astype(bool).values,
-        time=df_all["duration_days"].values,
-    )
-
-    # ✅ CHANGED: Random → Temporal
-    try:
-        train_idx, test_idx = temporal_train_test_split(df_all, test_size=0.25, logger=logger)
-    except Exception as e:
-        logger.warning(f"[RSF] Temporal split failed ({e}), falling back to random")
-        from sklearn.model_selection import train_test_split
-        train_idx, test_idx = train_test_split(
-            np.arange(len(X)), test_size=0.25, random_state=42, stratify=df_all["event"].values
-        )
-    
-    X_train = X.iloc[train_idx]
-    X_test = X.iloc[test_idx]
-    y_train = y[train_idx]
-    y_test = y[test_idx]
-
-    rsf = RandomSurvivalForest(
-        n_estimators=200,
-        min_samples_split=10,
-        min_samples_leaf=5,
-        random_state=42,
-        n_jobs=1
-    )
-
-    pipe = Pipeline([("pre", pre), ("rsf", rsf)])
-    logger.info("[RSF] Training with TEMPORAL validation...")
-    pipe.fit(X_train, y_train)
-
-    risk = pipe.predict(X_test)
-    ci = concordance_index_censored(y_test["event"], y_test["time"], risk)[0]
-    logger.info("[RSF] Test Concordance (TEMPORAL): %.4f", ci)
-    return pipe
-
-
-# =============================================================================
-# PATCH 3: train_ml_from_install (REPLACE EXISTING)
-# =============================================================================
-def train_ml_from_install(df, feature_cols, horizons_days, logger):
-    """
-    ✅ FIXED: Uses temporal split instead of random split
-    """
-    from xgboost import XGBClassifier
-    from catboost import CatBoostClassifier
-    from sklearn.pipeline import Pipeline
-    
-    X = df[feature_cols].copy()
-    y_event = df["event"].astype(int)
-    duration = df["duration_days"]
-
-    # Sanitization
-    all_nan = [c for c in X.columns if X[c].isna().all()]
-    if all_nan:
-        logger.warning(f"[ML] Dropping all-NaN columns: {all_nan}")
-        X = X.drop(columns=all_nan)
-
-    zero_var = [c for c in X.columns if X[c].nunique(dropna=False) <= 1]
-    if zero_var:
-        logger.warning(f"[ML] Dropping zero-variance columns: {zero_var}")
-        X = X.drop(columns=zero_var)
-
-    if X.empty:
-        logger.warning("[ML] No usable features → skipped")
-        return None
-
-    models = {}
-    safe_cols = X.columns.tolist()
-
-    for H in horizons_days:
-        y_h = ((y_event == 1) & (duration <= H)).astype(int)
-        pos = int(y_h.sum())
-
-        if pos < 50:
-            logger.info(f"[ML] Horizon {H//30}ay skipped (positives={pos})")
-            continue
-
-        pre = build_preprocessor(X)
-
-        # ✅ CHANGED: Random → Temporal
-        logger.info(f"[ML] Training {H//30}ay with TEMPORAL validation...")
-        
-        try:
-            train_idx, test_idx = temporal_train_test_split(df, test_size=0.25, logger=None)
-        except Exception as e:
-            logger.warning(f"[ML] Temporal split failed ({e}), falling back to random")
-            from sklearn.model_selection import train_test_split
-            train_idx, test_idx = train_test_split(
-                np.arange(len(X)), test_size=0.25, random_state=42, stratify=y_h
-            )
-        
-        X_train = X.iloc[train_idx]
-        X_test = X.iloc[test_idx]
-        y_train = y_h.iloc[train_idx]
-        y_test = y_h.iloc[test_idx]
-
-        X_tr = pre.fit_transform(X_train)
-        X_te = pre.transform(X_test)
-
-        # XGBoost
-        if XGB_OK:
-            xgb = XGBClassifier(
-                n_estimators=200, max_depth=4, learning_rate=0.05,
-                subsample=0.8, colsample_bytree=0.8,
-                eval_metric="auc", random_state=42
-            )
-            xgb.fit(X_tr, y_train)
-            
-            # ✅ TEMPORAL VALIDATION SCORE
-            from sklearn.metrics import roc_auc_score
-            y_pred = xgb.predict_proba(X_te)[:, 1]
-            auc = roc_auc_score(y_test, y_pred)
-            logger.info(f"[ML] XGB {H//30}ay AUC (TEMPORAL): {auc:.4f}")
-            
-            models[("xgb", f"{H//30}ay")] = Pipeline([("pre", pre), ("mdl", xgb)])
-
-        # CatBoost
-        if CAT_OK:
-            cat = CatBoostClassifier(
-                iterations=300, depth=4, learning_rate=0.05,
-                verbose=False, random_seed=42
-            )
-            cat.fit(X_tr, y_train)
-            
-            y_pred = cat.predict_proba(X_te)[:, 1]
-            auc = roc_auc_score(y_test, y_pred)
-            logger.info(f"[ML] CAT {H//30}ay AUC (TEMPORAL): {auc:.4f}")
-            
-            models[("cat", f"{H//30}ay")] = Pipeline([("pre", pre), ("mdl", cat)])
-
-    if not models:
-        logger.warning("[ML] No models trained")
-        return None
-
-    return {"models": models, "safe_cols": safe_cols}
-
-
-# =============================================================================
 # USAGE INSTRUCTIONS
 # =============================================================================
-"""
-STEP-BY-STEP PATCH APPLICATION:
-
-1. Add temporal_train_test_split() to your imports section (after line ~105)
-
-2. REPLACE train_cox_weibull() function (starts around line ~1012)
-   - Old: train_test_split(... random_state=42, stratify=...)
-   - New: temporal_train_test_split(work, test_size=0.25, logger=logger)
-
-3. REPLACE train_rsf_survival() function (starts around line ~1112)
-   - Old: train_test_split(... random_state=42, stratify=...)
-   - New: temporal_train_test_split(df_all, test_size=0.25, logger=logger)
-
-4. REPLACE train_ml_from_install() function (starts around line ~1153)
-   - Old: train_test_split(... random_state=42, stratify=y)
-   - New: temporal_train_test_split(df, test_size=0.25, logger=None)
-
-EXPECTED LOG OUTPUT CHANGES:
-Before: [COX] Test Concordance: 0.9521
-After:  [COX] Test Concordance (TEMPORAL): 0.88-0.92  ← More realistic!
-
-Before: [ML] XGB 12ay AUC: 0.9142
-After:  [ML] XGB 12ay AUC (TEMPORAL): 0.84-0.88  ← No future leakage!
-"""
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -710,6 +433,300 @@ def build_preprocessor(X: pd.DataFrame):
         verbose_feature_names_out=False,
     )
     return pre
+
+# ==============================================
+# FIX 2: Update train_cox_weibull
+# Location: Around line 120
+# ==============================================
+
+def train_cox_weibull(X_transformed: pd.DataFrame, duration: pd.Series, event: pd.Series, logger: logging.Logger):
+    """
+    ✅ FIXED: Properly handles Kurulum_Tarihi datetime column
+    """
+    from lifelines import CoxPHFitter, WeibullAFTFitter
+    from lifelines.utils import concordance_index
+    
+    if not LIFELINES_OK:
+        logger.warning("[SKIP] lifelines not available")
+        return None, None
+
+    work = X_transformed.copy()
+    work["duration_days"] = duration.values
+    work["event"] = event.values
+    
+    # ✅ Check if Kurulum_Tarihi exists
+    has_kurulum = "Kurulum_Tarihi" in work.columns
+    
+    if has_kurulum:
+        logger.info("[COX] Kurulum_Tarihi found, using temporal split")
+        kurulum_backup = work["Kurulum_Tarihi"].copy()
+    else:
+        logger.warning("[COX] Kurulum_Tarihi not found in work DataFrame")
+
+    # Convert numeric columns
+    numeric_cols = work.select_dtypes(include=[np.number]).columns
+    work[numeric_cols] = work[numeric_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    # ✅ TEMPORAL SPLIT
+    try:
+        if has_kurulum:
+            work["Kurulum_Tarihi"] = kurulum_backup  # Restore for split
+            train_idx, test_idx = temporal_train_test_split(work, test_size=0.25, logger=logger)
+            logger.info("[COX] ✅ Temporal split successful")
+        else:
+            raise ValueError("Kurulum_Tarihi not found")
+    except Exception as e:
+        logger.warning(f"[COX] Temporal split failed ({e}), falling back to random")
+        from sklearn.model_selection import train_test_split
+        train_idx, test_idx = train_test_split(
+            np.arange(len(work)), test_size=0.25, random_state=42, stratify=event.values
+        )
+    
+    # ✅ DROP Kurulum_Tarihi before model training
+    if "Kurulum_Tarihi" in work.columns:
+        work = work.drop(columns=["Kurulum_Tarihi"])
+    
+    train = work.iloc[train_idx].copy()
+    test = work.iloc[test_idx].copy()
+
+    cox = None
+    wb = None
+
+    try:
+        cox = CoxPHFitter(penalizer=0.05)
+        logger.info("[COX] Training...")
+        cox.fit(train, duration_col="duration_days", event_col="event")
+        test_scores = cox.predict_partial_hazard(test)
+        c_ind = concordance_index(test["duration_days"], -test_scores, test["event"])
+        logger.info("[COX] Test Concordance (TEMPORAL): %.4f", c_ind)
+    except Exception as e:
+        logger.error("[COX] Training failed: %s", e)
+        cox = None
+
+    try:
+        wb = WeibullAFTFitter(penalizer=0.05)
+        logger.info("[WEIBULL] Training...")
+        wb.fit(train, duration_col="duration_days", event_col="event")
+        wb_pred = wb.predict_median(test)
+        wb_cind = concordance_index(test["duration_days"], wb_pred, test["event"])
+        logger.info("[WEIBULL] Test Concordance (TEMPORAL): %.4f", wb_cind)
+    except Exception as e:
+        logger.error("[WEIBULL] Training failed: %s", e)
+        wb = None
+
+    return cox, wb
+
+
+# ============================================
+# FIX 3: Update train_rsf_survival
+# Location: Around line 180 (patched version)
+# ============================================
+
+def train_rsf_survival(df_all: pd.DataFrame, structural_cols: list, logger: logging.Logger):
+    """
+    ✅ FIXED: Uses Kurulum_Tarihi for temporal split
+    """
+    from sksurv.ensemble import RandomSurvivalForest
+    from sksurv.util import Surv
+    from sksurv.metrics import concordance_index_censored
+    from sklearn.pipeline import Pipeline
+    
+    if not SKSURV_OK:
+        logger.warning("[SKIP] sksurv not available")
+        return None
+
+    # ✅ Include Kurulum_Tarihi for split (will be removed before training)
+    cols = [c for c in structural_cols if c in df_all.columns]
+    X = df_all[cols].copy()
+    
+    y = Surv.from_arrays(
+        event=df_all["event"].astype(bool).values,
+        time=df_all["duration_days"].values,
+    )
+
+    # ✅ TEMPORAL SPLIT using full df_all (has Kurulum_Tarihi)
+    try:
+        train_idx, test_idx = temporal_train_test_split(df_all, test_size=0.25, logger=logger)
+    except Exception as e:
+        logger.warning(f"[RSF] Temporal split failed ({e}), falling back to random")
+        from sklearn.model_selection import train_test_split
+        train_idx, test_idx = train_test_split(
+            np.arange(len(X)), test_size=0.25, random_state=42, stratify=df_all["event"].values
+        )
+    
+    X_train = X.iloc[train_idx]
+    X_test = X.iloc[test_idx]
+    y_train = y[train_idx]
+    y_test = y[test_idx]
+
+    # Build preprocessor (handles categoricals)
+    pre = build_preprocessor(X_train)
+
+    rsf = RandomSurvivalForest(
+        n_estimators=200,
+        min_samples_split=10,
+        min_samples_leaf=5,
+        random_state=42,
+        n_jobs=1
+    )
+
+    pipe = Pipeline([("pre", pre), ("rsf", rsf)])
+    logger.info("[RSF] Training with TEMPORAL validation...")
+    pipe.fit(X_train, y_train)
+
+    risk = pipe.predict(X_test)
+    ci = concordance_index_censored(y_test["event"], y_test["time"], risk)[0]
+    logger.info("[RSF] Test Concordance (TEMPORAL): %.4f", ci)
+    return pipe
+
+
+# ============================================
+# FIX 4: Update train_ml_from_install
+# Location: Around line 240 (patched version)
+# ============================================
+
+def train_ml_from_install(df, feature_cols, horizons_days, logger):
+    """
+    ✅ FIXED: Uses Kurulum_Tarihi from df for temporal split
+    """
+    from xgboost import XGBClassifier
+    from catboost import CatBoostClassifier
+    from sklearn.pipeline import Pipeline
+    
+    X = df[feature_cols].copy()
+    y_event = df["event"].astype(int)
+    duration = df["duration_days"]
+
+    # Sanitization
+    all_nan = [c for c in X.columns if X[c].isna().all()]
+    if all_nan:
+        logger.warning(f"[ML] Dropping all-NaN columns: {all_nan}")
+        X = X.drop(columns=all_nan)
+
+    zero_var = [c for c in X.columns if X[c].nunique(dropna=False) <= 1]
+    if zero_var:
+        logger.warning(f"[ML] Dropping zero-variance columns: {zero_var}")
+        X = X.drop(columns=zero_var)
+
+    if X.empty:
+        logger.warning("[ML] No usable features → skipped")
+        return None
+
+    models = {}
+    safe_cols = X.columns.tolist()
+
+    for H in horizons_days:
+        y_h = ((y_event == 1) & (duration <= H)).astype(int)
+        pos = int(y_h.sum())
+
+        if pos < 50:
+            logger.info(f"[ML] Horizon {H//30}ay skipped (positives={pos})")
+            continue
+
+        pre = build_preprocessor(X)
+
+        # ✅ TEMPORAL SPLIT using full df (has Kurulum_Tarihi)
+        logger.info(f"[ML] Training {H//30}ay with TEMPORAL validation...")
+        
+        try:
+            train_idx, test_idx = temporal_train_test_split(df, test_size=0.25, logger=None)
+        except Exception as e:
+            logger.warning(f"[ML] Temporal split failed ({e}), falling back to random")
+            from sklearn.model_selection import train_test_split
+            train_idx, test_idx = train_test_split(
+                np.arange(len(X)), test_size=0.25, random_state=42, stratify=y_h
+            )
+        
+        X_train = X.iloc[train_idx]
+        X_test = X.iloc[test_idx]
+        y_train = y_h.iloc[train_idx]
+        y_test = y_h.iloc[test_idx]
+
+        X_tr = pre.fit_transform(X_train)
+        X_te = pre.transform(X_test)
+
+        # XGBoost
+        if XGB_OK:
+            xgb = XGBClassifier(
+                n_estimators=200, max_depth=4, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8,
+                eval_metric="auc", random_state=42
+            )
+            xgb.fit(X_tr, y_train)
+            
+            from sklearn.metrics import roc_auc_score
+            y_pred = xgb.predict_proba(X_te)[:, 1]
+            auc = roc_auc_score(y_test, y_pred)
+            logger.info(f"[ML] XGB {H//30}ay AUC (TEMPORAL): {auc:.4f}")
+            
+            models[("xgb", f"{H//30}ay")] = Pipeline([("pre", pre), ("mdl", xgb)])
+
+        # CatBoost
+        if CAT_OK:
+            cat = CatBoostClassifier(
+                iterations=300, depth=4, learning_rate=0.05,
+                verbose=False, random_seed=42
+            )
+            cat.fit(X_tr, y_train)
+            
+            y_pred = cat.predict_proba(X_te)[:, 1]
+            auc = roc_auc_score(y_test, y_pred)
+            logger.info(f"[ML] CAT {H//30}ay AUC (TEMPORAL): {auc:.4f}")
+            
+            models[("cat", f"{H//30}ay")] = Pipeline([("pre", pre), ("mdl", cat)])
+
+    if not models:
+        logger.warning("[ML] No models trained")
+        return None
+
+    return {"models": models, "safe_cols": safe_cols}
+
+# ============================================
+# FIX 5: Update temporal_train_test_split to handle datetime
+# Location: Around line 45
+# ============================================
+
+def temporal_train_test_split(
+    df: pd.DataFrame,
+    test_size: float = 0.25,
+    logger: logging.Logger = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    ✅ FIXED: Properly handles Kurulum_Tarihi datetime column
+    """
+    if "Kurulum_Tarihi" not in df.columns:
+        raise ValueError("Temporal split requires 'Kurulum_Tarihi' column")
+    
+    # Ensure datetime
+    install_dates = pd.to_datetime(df["Kurulum_Tarihi"], errors="coerce")
+    
+    if install_dates.isna().all():
+        raise ValueError("All Kurulum_Tarihi values are invalid")
+    
+    # Create a clean sorting dataframe
+    df_sorted = df.copy()
+    df_sorted["_install_date_clean"] = install_dates
+    df_sorted = df_sorted.sort_values("_install_date_clean").reset_index(drop=True)
+    
+    # Cutoff date
+    cutoff_date = df_sorted["_install_date_clean"].quantile(1 - test_size)
+    
+    train_mask = df_sorted["_install_date_clean"] <= cutoff_date
+    test_mask = ~train_mask
+    
+    train_idx = df_sorted[train_mask].index.values
+    test_idx = df_sorted[test_mask].index.values
+    
+    if logger:
+        logger.info(f"[TEMPORAL SPLIT] Cutoff: {cutoff_date.date()}")
+        logger.info(f"[TEMPORAL SPLIT] Train: {len(train_idx)} | Test: {len(test_idx)}")
+        if "event" in df.columns:
+            logger.info(f"[TEMPORAL SPLIT] Train events: {df.loc[train_idx, 'event'].sum():.0f} ({100*df.loc[train_idx, 'event'].mean():.1f}%)")
+            logger.info(f"[TEMPORAL SPLIT] Test events: {df.loc[test_idx, 'event'].sum():.0f} ({100*df.loc[test_idx, 'event'].mean():.1f}%)")
+    
+    return train_idx, test_idx
+
+
 
 # =============================================================================
 # EQUIPMENT TYPE STATISTICS
@@ -1289,7 +1306,7 @@ def compute_chronic_features(fault_events_clean: pd.DataFrame, t_ref: pd.Timesta
             return 0.0
         return float((x*y).sum() / denom)
 
-    trend = bin_counts.groupby("cbs_id").apply(slope_for_asset).rename("Chronic_Trend_Slope")
+    trend = bin_counts.groupby("cbs_id", group_keys=False).apply(slope_for_asset).rename("Chronic_Trend_Slope")
 
     # Bayesian MTBF (global prior)
     # For each asset: smoothed MTBF ≈ (C + sum(gaps)) / (alpha + n_gaps)
@@ -1326,7 +1343,8 @@ def step02a_yapisal(equipment_master: pd.DataFrame, t_ref: pd.Timestamp, logger:
     df = equipment_master.copy()
 
     # Structural set: no fault-history used for survival.
-    keep_cols = ["cbs_id", "Ekipman_Tipi", "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka", "kVA_Rating",
+    # ✅ ADDED: Kurulum_Tarihi for temporal validation
+    keep_cols = ["cbs_id", "Ekipman_Tipi", "Kurulum_Tarihi", "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka", "kVA_Rating",
                  "Sehir", "Ilce", "Mahalle", "Location_Known", "Musteri_Sayisi"]
 
     cols = [c for c in keep_cols if c in df.columns]
@@ -1509,24 +1527,49 @@ def auto_prune_features(X, logger, max_cardinality=20):
                 )
                 drop_cols.append(col)
 
+        elif pd.api.types.is_datetime64_any_dtype(X[col]):
+            # Drop datetime columns - they need special handling
+            logger.info(f"[FEATURE] Dropping datetime column {col}")
+            drop_cols.append(col)
+
         else:
-            if X[col].var(skipna=True) < 1e-6:
+            # Numeric column - check variance
+            try:
+                if X[col].var(skipna=True) < 1e-6:
+                    drop_cols.append(col)
+            except (TypeError, AttributeError):
+                # If variance fails, drop the column
+                logger.warning(f"[FEATURE] Dropping {col} (variance computation failed)")
                 drop_cols.append(col)
 
     if drop_cols:
         logger.info(f"[FEATURE] Auto-pruned: {drop_cols}")
 
     return X.drop(columns=drop_cols, errors="ignore")
+
 def select_cox_safe_features(df, structural_cols, logger):
-    base_cols = select_survival_safe_features(
-        df, structural_cols, logger
-    )
+    """✅ FIXED: Explicitly includes Kurulum_Tarihi"""
+    base_cols = select_survival_safe_features(df, structural_cols, logger)
+
+    # ✅ CRITICAL: Add Kurulum_Tarihi
+    if "Kurulum_Tarihi" in df.columns:
+        if "Kurulum_Tarihi" not in base_cols:
+            base_cols = base_cols + ["Kurulum_Tarihi"]
+            logger.info("[COX] Added Kurulum_Tarihi for temporal validation")
+    else:
+        logger.warning("[COX] Kurulum_Tarihi not found in df.columns")
 
     X = df[base_cols].copy()
-
     X = auto_prune_features(X, logger)
 
-    # One-hot only after pruning
+    # ✅ PRESERVE Kurulum_Tarihi before one-hot encoding
+    kurulum_col = None
+    if "Kurulum_Tarihi" in X.columns:
+        kurulum_col = X["Kurulum_Tarihi"].copy()
+        X = X.drop(columns=["Kurulum_Tarihi"])
+        logger.info("[COX] Preserved Kurulum_Tarihi for temporal split")
+
+    # One-hot encode categoricals
     cat_cols = X.select_dtypes(include="object").columns.tolist()
     if cat_cols:
         X = pd.get_dummies(
@@ -1535,10 +1578,17 @@ def select_cox_safe_features(df, structural_cols, logger):
 
     X = X.apply(pd.to_numeric, errors="coerce")
 
+    # ✅ RE-ADD Kurulum_Tarihi at the end
+    if kurulum_col is not None:
+        X["Kurulum_Tarihi"] = kurulum_col
+        logger.info("[COX] Re-added Kurulum_Tarihi to feature matrix")
+
     if X.shape[1] == 0:
         raise ValueError("No survival-safe features left")
 
     return X
+
+
 def select_ml_safe_features(df, candidate_cols, logger):
     forbidden = FEATURE_REGISTRY["temporal_leakage"]
 
@@ -1871,12 +1921,12 @@ class TemporalBacktester:
             # C. Train Model (Hidden from future)
             # Using your existing robust feature selection logic
             structural_cols = [c for c in df_train.columns if c not in ["cbs_id", "event", "duration_days", "T_ref"]]
-            
+
             # Simplified XGB training for backtest speed
-            model = self._train_model(df_train, structural_cols, y_true) # (We train on target proxy)
-            
+            model, valid_features = self._train_model(df_train, structural_cols, y_true) # (We train on target proxy)
+
             # D. Evaluate
-            probs = model.predict_proba(df_train[structural_cols])[:, 1]
+            probs = model.predict_proba(df_train[valid_features])[:, 1]
             score = roc_auc_score(y_true, probs)
             
             # Precision at Top K (Real-world metric)
@@ -1895,49 +1945,53 @@ class TemporalBacktester:
 
         return pd.DataFrame(self.results)
 
-def _train_model(self, df, features, y_labels):
-    """
-    ✅ FIXED: Proper preprocessing for XGBoost
-    """
-    from xgboost import XGBClassifier
-    
-    # Filter to available columns
-    available_features = [f for f in features if f in df.columns]
-    X = df[available_features].copy()
-    
-    # ✅ CRITICAL FIX: Remove datetime/object columns
-    # XGBoost needs numeric only
-    datetime_cols = X.select_dtypes(include=['datetime64']).columns.tolist()
-    object_cols = X.select_dtypes(include=['object']).columns.tolist()
-    
-    if datetime_cols or object_cols:
-        self.logger.info(f"[BACKTEST] Dropping {len(datetime_cols)} datetime + {len(object_cols)} object columns")
-        X = X.drop(columns=datetime_cols + object_cols, errors='ignore')
-    
-    # Keep only numeric
-    X = X.select_dtypes(include=[np.number])
-    
-    # Handle missing
-    X = X.fillna(0)
-    
-    if X.empty or len(X.columns) == 0:
-        self.logger.warning("[BACKTEST] No valid features after cleanup")
-        # Return dummy model
-        from sklearn.dummy import DummyClassifier
-        dummy = DummyClassifier(strategy='stratified')
-        dummy.fit(X if not X.empty else np.zeros((len(y_labels), 1)), y_labels)
-        return dummy
-    
-    self.logger.info(f"[BACKTEST] Training with {len(X.columns)} numeric features")
-    
-    model = XGBClassifier(
-        n_estimators=100, 
-        max_depth=4, 
-        eval_metric="logloss",
-        random_state=42
-    )
-    model.fit(X, y_labels)
-    return model
+    def _train_model(self, df, features, y_labels):
+        """
+        ✅ FIXED: Proper preprocessing for XGBoost
+        Returns: (model, valid_feature_columns)
+        """
+        from xgboost import XGBClassifier
+
+        # Filter to available columns
+        available_features = [f for f in features if f in df.columns]
+        X = df[available_features].copy()
+
+        # ✅ CRITICAL FIX: Remove datetime/object columns
+        # XGBoost needs numeric only
+        datetime_cols = X.select_dtypes(include=['datetime64']).columns.tolist()
+        object_cols = X.select_dtypes(include=['object']).columns.tolist()
+
+        if datetime_cols or object_cols:
+            self.logger.info(f"[BACKTEST] Dropping {len(datetime_cols)} datetime + {len(object_cols)} object columns")
+            X = X.drop(columns=datetime_cols + object_cols, errors='ignore')
+
+        # Keep only numeric
+        X = X.select_dtypes(include=[np.number])
+
+        # Handle missing
+        X = X.fillna(0)
+
+        # Store valid feature names
+        valid_features = X.columns.tolist()
+
+        if X.empty or len(valid_features) == 0:
+            self.logger.warning("[BACKTEST] No valid features after cleanup")
+            # Return dummy model
+            from sklearn.dummy import DummyClassifier
+            dummy = DummyClassifier(strategy='stratified')
+            dummy.fit(X if not X.empty else np.zeros((len(y_labels), 1)), y_labels)
+            return dummy, []
+
+        self.logger.info(f"[BACKTEST] Training with {len(valid_features)} numeric features")
+
+        model = XGBClassifier(
+            n_estimators=100,
+            max_depth=4,
+            eval_metric="logloss",
+            random_state=42
+        )
+        model.fit(X, y_labels)
+        return model, valid_features
 # =============================================================================
 # ENSEMBLE SCORE
 # =============================================================================
@@ -1965,15 +2019,16 @@ def main():
     logger = setup_logger()
 
     # 1. Load Raw Data (Static Step)
-    df_fault_raw = load_fault_data(logger)
-    df_healthy_raw = load_healthy_data(logger)
-
+    #df_fault_raw = load_fault_data(logger)
+    #df_healthy_raw = load_healthy_data(logger)
+    df_fault = load_fault_data(logger)
+    df_healthy = load_healthy_data(logger)
     # ----------------------------------------------------------------
     # 2. RUN BACKTESTING (The "Proof of Value" Step)
     # ----------------------------------------------------------------
     # Auto-detect years: If data is 2018-2025, test on 2022, 2023, 2024
-    max_year = df_fault_raw["started at"].max().year
-    backtester = TemporalBacktester(df_fault_raw, df_healthy_raw, logger)
+    max_year = df_fault["started at"].max().year
+    backtester = TemporalBacktester(df_fault, df_healthy, logger)
     
     # Run for the last 3 complete years
     backtest_results = backtester.run(start_year=max_year-3, end_year=max_year-1)
@@ -1994,8 +2049,7 @@ def main():
     # -------------------------
     # STEP-01 (Değişmez)
     # -------------------------
-    df_fault = load_fault_data(logger)
-    df_healthy = load_healthy_data(logger)
+
 
     data_start = df_fault["started at"].min()
     data_end = df_fault["started at"].max()
@@ -2060,7 +2114,8 @@ def main():
     df_all["cbs_id"] = df_all["cbs_id"].astype(str).str.lower().str.strip()
     features_all["cbs_id"] = features_all["cbs_id"].astype(str).str.lower().str.strip()
 
-    survival_cols_to_keep = ["cbs_id", "event", "duration_days", "Kurulum_Tarihi", 
+    # Keep only survival-specific columns (Kurulum_Tarihi is in features_all)
+    survival_cols_to_keep = ["cbs_id", "event", "duration_days",
                             "Fault_Count", "Ilk_Ariza_Tarihi", "Son_Ariza_Tarihi",
                             "Ekipman_Yasi_Gun", "Ariza_Gecmisi"]
     survival_cols_to_keep = [c for c in survival_cols_to_keep if c in df_all.columns]
