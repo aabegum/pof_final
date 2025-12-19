@@ -11,12 +11,13 @@ import json
 import logging
 from datetime import datetime
 from typing import Tuple
-
+from tqdm import tqdm  # <--- Add this with other imports
 import numpy as np
 import pandas as pd
 import yaml
 from scipy import stats
 from sklearn.feature_selection import VarianceThreshold
+from joblib import Parallel, delayed
 # Soft dependencies
 try:
     from lifelines import CoxPHFitter, WeibullAFTFitter
@@ -136,7 +137,7 @@ REAL_FAILURE_CODES = [
     "NH Altlık Arızası",            # 42 records - NH base failure
     
     # Other Equipment Failures
-    "AG Travers Arızası",           # 4 records - Crossarm failure
+"""     "AG Travers Arızası",           # 4 records - Crossarm failure
     "AG Sehim Bozukluğu",           # 16 records - Sag defect
     "AG Pano Kol Sigorta Atığı",    # 5,414 records - Fuse opened (NORMAL!)
     "OG Sigorta Atması",            # 2,470 records - Fuse tripped (NORMAL!)
@@ -150,12 +151,12 @@ REAL_FAILURE_CODES = [
     # Breaker operations
     "AG Termik Açması",             # 42 records - Thermal trip (NORMAL!)
     "TMS Açması",                   # 37 records - Circuit breaker trip
-    "OG Fider Açması",              # 7 records - Feeder breaker trip
+    "OG Fider Açması",              # 7 records - Feeder breaker trip """
 ]
 
 # Protective operations (fuses/breakers doing their job)
 PROTECTIVE_OPERATIONS = [
-"""     # Fuse operations (87% of all records!)
+    # Fuse operations (87% of all records!)
     "AG Pano Kol Sigorta Atığı",    # 5,414 records - Fuse opened (NORMAL!)
     "OG Sigorta Atması",            # 2,470 records - Fuse tripped (NORMAL!)
     "OG Sigorta Atığı",             # 1,996 records - Fuse tripped (NORMAL!)
@@ -168,7 +169,7 @@ PROTECTIVE_OPERATIONS = [
     # Breaker operations
     "AG Termik Açması",             # 42 records - Thermal trip (NORMAL!)
     "TMS Açması",                   # 37 records - Circuit breaker trip
-    "OG Fider Açması",              # 7 records - Feeder breaker trip """
+    "OG Fider Açması",              # 7 records - Feeder breaker trip
 ]
 
 # Maintenance/planned events
@@ -725,7 +726,8 @@ def select_top_features(X_train, y_train, X_test, top_k=20, logger=None):
         return X_train, X_test  # Already fewer than top_k
     
     # Train quick RF to get importances
-    rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)
+    #rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)
+    rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=1)
     rf.fit(X_train, y_train)
     
     # Get top K features
@@ -839,7 +841,8 @@ def select_cox_safe_features(df: pd.DataFrame, structural_cols: list, logger: lo
     #X = remove_low_variance_features(X, logger)
     
     # 6. ⚠️ NEW: Remove multicollinear features
-    X = remove_multicollinear_features(X, threshold=10.0, logger=logger)
+    #X = remove_multicollinear_features(X, threshold=10.0, logger=logger)
+    X = remove_multicollinear_features(X, threshold=20.0, logger=logger)
     
     # 7. ⚠️ NEW: Remove highly correlated features
     X = remove_highly_correlated_features(X, threshold=0.95, logger=logger)
@@ -877,7 +880,13 @@ def train_cox_weibull(
     work["duration_days"] = duration.values
     work["event"] = event.values
     work["entry_days"] = entry.values # <--- Add this
+    # ✅ ADD SAFETY CHECK
+    # Remove helper columns to count actual features
+    feature_cols = [c for c in work.columns if c not in ["duration_days", "event", "entry_days", "Kurulum_Tarihi"]]
     
+    if len(feature_cols) == 0:
+        logger.warning("[COX] No features left after filtering - skipping Cox/Weibull")
+        return None, None
     # Check for temporal column
     has_kurulum = "Kurulum_Tarihi" in work.columns
     if has_kurulum:
@@ -990,7 +999,8 @@ def train_rsf_survival(
     # Build pipeline
     pre = build_preprocessor(X_train)
     rsf = RandomSurvivalForest(
-        n_estimators=200,
+        #n_estimators=200,
+        n_estimators=100,
         min_samples_split=10,
         min_samples_leaf=5,
         random_state=42,
@@ -1018,45 +1028,54 @@ def train_ml_models(
     horizons_days: list,
     logger: logging.Logger
 ):
-    """
-    UPDATED: Uses Gradient Boosting Survival Analysis (Cox Loss).
-    This treats ML exactly like Survival Analysis:
-    It learns from OLD assets too, not just infant mortality.
-    """
-    # Check dependency
     try:
         from sksurv.ensemble import GradientBoostingSurvivalAnalysis
+        from sksurv.util import Surv
     except ImportError:
-        logger.warning("[ML] sksurv not installed or GBSA missing. Skipping ML.")
+        logger.warning("[ML] sksurv not installed. Skipping ML.")
         return None
 
-    # Filter safe features
-    X = df[feature_cols].copy()
+    # --- FIX: SAFE INDEXING ---
+    # 1. Create a clean working copy and RESET INDEX
+    # This ensures that Row Label 0 = Position 0, Label 1 = Position 1, etc.
+    work_df = df.copy().reset_index(drop=True)
+    
+    # 2. Select Features
+    X = work_df[feature_cols].copy()
     X = X.select_dtypes(include=[np.number, 'object'])
     
-    # 1. Create Survival Target (Structured Array)
-    # This format tells the model: "It lived this long, and did it die?"
+    # 3. Create Target
     y = Surv.from_arrays(
-        event=df["event"].astype(bool).values,
-        time=df["duration_days"].values
+        event=work_df["event"].astype(bool).values,
+        time=work_df["duration_days"].values
     )
 
-    # 2. Split (Using the same logic as RSF/Cox)
-    try:
-        train_idx, test_idx = temporal_train_test_split(df, test_size=0.25, logger=None)
-    except:
-        train_idx, test_idx = train_test_split(
-            np.arange(len(X)), test_size=0.25, random_state=42, stratify=df["event"]
-        )
-
-    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-    y_train, y_test = y[train_idx], y[test_idx]
+    # 4. Temporal Split (Manual & Safe)
+    # We sort by date manually here to guarantee 'iloc' works
+    if "Kurulum_Tarihi" in work_df.columns:
+        # Sort by installation date (oldest learns first)
+        sort_idxs = np.argsort(work_df["Kurulum_Tarihi"].values)
+    else:
+        # Sort by duration if date missing
+        sort_idxs = np.argsort(work_df["duration_days"].values)
+        
+    # Reorder X and y based on time
+    X = X.iloc[sort_idxs]
+    y = y[sort_idxs]
+    
+    # 5. Split Logic (75% Train, 25% Test)
+    n_samples = len(X)
+    split_point = int(n_samples * 0.75)
+    
+    # Pure positional slicing (Cannot fail "out of bounds")
+    X_train = X.iloc[:split_point]
+    X_test = X.iloc[split_point:]
+    y_train = y[:split_point]
+    y_test = y[split_point:]
 
     # 3. Preprocess
     pre = build_preprocessor(X_train)
     
-    # 4. Train Gradient Boosting Survival (The "XGBoost" of Survival)
-    # loss='coxph' makes it optimize the same math as Cox, but with Trees!
     gbsa = GradientBoostingSurvivalAnalysis(
         n_estimators=100,
         learning_rate=0.1,
@@ -1065,16 +1084,14 @@ def train_ml_models(
         random_state=42
     )
 
+    from sklearn.pipeline import Pipeline
     model_pipeline = Pipeline([("pre", pre), ("gbsa", gbsa)])
     
     try:
-        logger.info("[ML] Training Gradient Boosting Survival (Ensemble Member)...")
+        logger.info(f"[ML] Training GBSA on {len(X_train)} samples...")
         model_pipeline.fit(X_train, y_train)
-        
-        # Validate
         score = model_pipeline.score(X_test, y_test)
         logger.info(f"[ML] GBSA Test Concordance: {score:.4f}")
-        
         return {"model": model_pipeline, "safe_cols": feature_cols}
         
     except Exception as e:
@@ -1082,11 +1099,14 @@ def train_ml_models(
         return None
 
 def predict_ml_pof(df: pd.DataFrame, ml_pack: dict, horizons: list) -> pd.DataFrame:
-    """
-    Predicts PoF using the Survival Curves from Gradient Boosting.
-    Calculates Conditional Probability: P(Fail in next H days | Survived until now)
-    """
-    model = ml_pack["model"]
+    # ✅ FIX: Handle both old and new dict structure
+    if "model" in ml_pack:
+        model = ml_pack["model"]
+    elif "models" in ml_pack:
+        model = ml_pack["models"]
+    else:
+        return pd.DataFrame({"cbs_id": df["cbs_id"].values})
+    
     cols = ml_pack["safe_cols"]
     
     X = df[cols].copy()
@@ -1129,7 +1149,10 @@ def predict_ml_pof(df: pd.DataFrame, ml_pack: dict, horizons: list) -> pd.DataFr
 # BACKTESTING (Temporal Validation Proof)
 # =============================================================================
 class TemporalBacktester:
-    """Walk-forward validation to prove model doesn't cheat"""
+    """
+    Walk-forward validation to prove model doesn't cheat.
+    Simulates: "If we ran this model in 2022, would it have predicted the 2023 failures?"
+    """
     
     def __init__(self, df_fault: pd.DataFrame, df_healthy: pd.DataFrame, logger: logging.Logger):
         self.df_fault = df_fault
@@ -1138,16 +1161,46 @@ class TemporalBacktester:
         self.results = []
     
     def _generate_snapshot(self, cutoff_date: pd.Timestamp):
-        """Create training dataset - SINGLE DATAFRAME"""
+        """
+        Create training dataset as it would have looked at 'cutoff_date'.
+        Crucial: We must not see any data after cutoff_date.
+        """
+        # 1. Filter faults known at that time
         faults_past = self.df_fault[self.df_fault["started at"] <= cutoff_date].copy()
+        
+        # 2. Apply the same "Real Failure" filter logic
         faults_filtered = filter_real_failures(faults_past, self.logger)
         
-        # Build complete dataset in one go
+        # 3. Determine Observation Start (Dynamic based on available history)
+        # This fixes the "Missing Argument" bug
+        if not self.df_fault.empty:
+            observation_start_date = self.df_fault["started at"].min()
+        else:
+            observation_start_date = cutoff_date # Fallback
+            
+        # 4. Build Dataset (Using fixed signatures)
         equipment_master = build_equipment_master(faults_past, self.df_healthy, self.logger, cutoff_date)
-        df_snapshot = add_survival_columns_inplace(equipment_master, faults_filtered, cutoff_date, self.logger)
         
+        # Pass observation_start_date correctly
+        df_snapshot = add_survival_columns_inplace(
+            equipment_master, 
+            faults_filtered, 
+            cutoff_date, 
+            observation_start_date, # <--- FIX: Added missing arg
+            self.logger
+        )
+        
+        # 5. Add Features
         chronic_df = compute_chronic_features(faults_past, cutoff_date, self.logger)
-        df_snapshot = add_temporal_features_inplace(df_snapshot, cutoff_date, chronic_df, self.logger)
+        
+        # Pass observation_start_date correctly
+        df_snapshot = add_temporal_features_inplace(
+            df_snapshot, 
+            cutoff_date, 
+            chronic_df, 
+            observation_start_date, # <--- FIX: Added missing arg
+            self.logger
+        )
         
         return df_snapshot
     
@@ -1155,18 +1208,31 @@ class TemporalBacktester:
         """Train lightweight XGBoost for backtesting"""
         X = df[features].copy()
         
-        # Remove non-numeric
-        X = X.drop(columns=X.select_dtypes(include=['datetime64']).columns, errors='ignore')
+        # Data Hygiene: Remove dates and non-numerics just in case
         X = X.select_dtypes(include=[np.number]).fillna(0)
         
+        # Safety check: If X is empty (e.g. no features generated), return Dummy
         if X.empty or len(X.columns) == 0:
             from sklearn.dummy import DummyClassifier
             return DummyClassifier(strategy='constant', constant=0), []
         
-        model = XGBClassifier(n_estimators=100, max_depth=4, eval_metric="logloss", random_state=42)
-        model.fit(X, df["event"])
+        # Train simple classifier
+        # We use a smaller model for backtesting speed
+        model = XGBClassifier(
+            n_estimators=50, 
+            max_depth=3, 
+            eval_metric="logloss", 
+            random_state=42,
+            n_jobs=-1
+        )
         
-        return model, X.columns.tolist()
+        try:
+            model.fit(X, df["event"])
+            return model, X.columns.tolist()
+        except Exception as e:
+            self.logger.warning(f"[BACKTEST] Model training failed: {e}")
+            from sklearn.dummy import DummyClassifier
+            return DummyClassifier(strategy='constant', constant=0), []
     
     def run(self, start_year: int, end_year: int, horizon_days: int = 365):
         """Run walk-forward validation"""
@@ -1174,53 +1240,82 @@ class TemporalBacktester:
         self.logger.info(f"[BACKTEST] Walk-Forward Validation ({start_year}-{end_year})")
         self.logger.info("="*60)
         
+        from sklearn.metrics import roc_auc_score
+        
         for year in range(start_year, end_year + 1):
             cutoff_date = pd.Timestamp(f"{year}-01-01")
             test_end_date = cutoff_date + pd.Timedelta(days=horizon_days)
             
-            # Training data (history up to Jan 1st)
+            # 1. Generate Historical Snapshot
+            self.logger.info(f"[BACKTEST] Generating snapshot for {cutoff_date.date()}...")
             df_train = self._generate_snapshot(cutoff_date)
             
-            # Ground truth (who actually failed in next 12 months)
+            # 2. Define Ground Truth (What happened in the next year?)
+            # We look at the MAIN fault database for future events
             future_faults = self.df_fault[
                 (self.df_fault["started at"] > cutoff_date) & 
                 (self.df_fault["started at"] <= test_end_date)
             ]
+            
+            # Filter future faults to only include REAL failures
+            # (We don't want to fail the model because a fuse blew)
+            future_faults = filter_real_failures(future_faults, self.logger)
+            
             failed_ids = set(future_faults["cbs_id"].unique())
+            
+            # Target: 1 if asset failed in prediction window, 0 otherwise
             y_true = df_train["cbs_id"].isin(failed_ids).astype(int)
             
-            if y_true.sum() < 10:
-                self.logger.warning(f"[BACKTEST] {year}: Insufficient failures ({y_true.sum()})")
+            if y_true.sum() < 5:
+                self.logger.warning(f"[BACKTEST] {year}: Skipped - Insufficient failures ({y_true.sum()}) to evaluate.")
                 continue
             
-            # Train model
-            structural_cols = [c for c in df_train.columns 
-                             if c not in ["cbs_id", "event", "duration_days", "Kurulum_Tarihi"]]
+            # 3. Train Model
+            # Exclude target leakage columns
+            exclude_cols = ["cbs_id", "event", "duration_days", "Kurulum_Tarihi", "entry_days", 
+                            "Ilk_Gercek_Ariza_Tarihi", "started at", "ended at"]
+            structural_cols = [c for c in df_train.columns if c not in exclude_cols]
+            
             model, valid_features = self._train_simple_model(df_train, structural_cols)
             
-            # Evaluate
+            # 4. Predict
             if valid_features:
                 X_test = df_train[valid_features].fillna(0)
                 probs = model.predict_proba(X_test)[:, 1]
             else:
                 probs = np.zeros(len(y_true))
             
-            auc = roc_auc_score(y_true, probs) if len(np.unique(y_true)) > 1 else 0.5
+            # 5. Evaluate
+            try:
+                auc = roc_auc_score(y_true, probs)
+            except ValueError:
+                auc = 0.5
             
-            # Precision@Top-K
-            top_100_idx = np.argsort(probs)[-100:]
-            hits = y_true.iloc[top_100_idx].sum()
+            # Precision at Top 100 (Operational Metric)
+            # "If we inspected the top 100 risk items, how many were actually broken?"
+            if len(probs) >= 100:
+                top_100_idx = np.argsort(probs)[-100:]
+                hits = y_true.iloc[top_100_idx].sum()
+            else:
+                hits = y_true.sum() # Edge case for small datasets
             
-            self.logger.info(f"[BACKTEST] {year} → AUC: {auc:.3f} | Top-100 Hits: {hits}")
+            self.logger.info(f"[BACKTEST] {year} Results -> AUC: {auc:.3f} | Top-100 Hits: {hits}/{min(100, y_true.sum())}")
             
             self.results.append({
                 "Year": year,
                 "AUC": auc,
                 "Top100_Hits": hits,
-                "Total_Failures": y_true.sum()
+                "Total_Failures_In_Window": y_true.sum()
             })
         
-        return pd.DataFrame(self.results)
+        # Save Summary
+        results_df = pd.DataFrame(self.results)
+        if not results_df.empty:
+            out_path = os.path.join(os.path.dirname(self.logger.handlers[0].baseFilename).replace("loglar", "data/sonuclar"), "backtest_results_temporal.csv")
+            results_df.to_csv(out_path, index=False)
+            self.logger.info(f"[BACKTEST] Results saved: {out_path}")
+            
+        return results_df
 
 # =============================================================================
 # EQUIPMENT-SPECIFIC MODELING
@@ -1262,11 +1357,14 @@ def train_equipment_specific_models(
     try:
         X_cox = select_cox_safe_features(df_eq, structural_cols, logger)
         
-        # FIX: Check if we have any features left after filtering
-        if X_cox is None or X_cox.shape[1] == 0:
-            logger.warning(f"[{eq_type}] Cox/Weibull skipped: No usable features after filtering (VIF/Variance checks).")
+        # ✅ FIX: Check feature count BEFORE training
+        feature_count = X_cox.shape[1] if X_cox is not None else 0
+        logger.info(f"[{eq_type}] Features after filtering: {feature_count}")
+        
+        if feature_count < 2:
+            logger.warning(f"[{eq_type}] Too few features ({feature_count}) - skipping Cox/Weibull")
         else:
-            # Train with Left Truncation (entry_days)
+            # ✅ Only train if we have enough features
             cox, wb = train_cox_weibull(
                 X_cox, 
                 df_eq["duration_days"], 
@@ -1287,8 +1385,7 @@ def train_equipment_specific_models(
                 predictions = predictions.merge(cox_pred, on="cbs_id", how="left")
                 
     except Exception as e:
-        logger.warning(f"[{eq_type}] Cox/Weibull logic failed: {e}")
-    
+        logger.warning(f"[{eq_type}] Cox/Weibull failed: {e}")
     # ---------------------------------------------------------
     # 2. Random Survival Forests (RSF)
     # ---------------------------------------------------------
@@ -1416,73 +1513,110 @@ def predict_rsf_pof(df: pd.DataFrame, rsf_pipe, structural_cols: list, horizons:
     return out
 
 def predict_ml_pof(df: pd.DataFrame, ml_pack: dict, horizons: list) -> pd.DataFrame:
-    """Predict PoF from ML models"""
-    X = df[ml_pack["safe_cols"]].copy()
+    """
+    Predicts PoF using the Survival Curves from Gradient Boosting.
+    """
+    # ✅ Step 1: Get the pipeline
+    if "model" in ml_pack:
+        pipeline = ml_pack["model"]
+    elif "models" in ml_pack:
+        pipeline = ml_pack["models"]
+    else:
+        return pd.DataFrame({"cbs_id": df["cbs_id"].values})
+    
+    cols = ml_pack["safe_cols"]
+    X = df[cols].copy()
+    current_age = df["duration_days"].fillna(0).clip(lower=0).values
+    
     out = pd.DataFrame({"cbs_id": df["cbs_id"].values})
     
+    # ✅ Step 2: Extract the GBSA model from the pipeline
+    # Pipeline structure: [("pre", preprocessor), ("gbsa", GradientBoostingSurvivalAnalysis)]
+    try:
+        gbsa_model = pipeline.named_steps["gbsa"]
+    except (AttributeError, KeyError):
+        # Not a pipeline or no 'gbsa' step - return empty predictions
+        return out
+    
+    # ✅ Step 3: Preprocess features
+    X_transformed = pipeline.named_steps["pre"].transform(X)
+    
+    # ✅ Step 4: Get survival functions from GBSA
+    surv_funcs = gbsa_model.predict_survival_function(X_transformed)
+    
+    # ✅ Step 5: Calculate conditional PoF for each horizon
     for H in horizons:
         label = SURVIVAL_HORIZON_LABELS.get(H, f"{H}g")
-        preds = []
+        pofs = []
         
-        if ("xgb", label) in ml_pack["models"]:
-            preds.append(ml_pack["models"][("xgb", label)].predict_proba(X)[:, 1])
-        if ("cat", label) in ml_pack["models"]:
-            preds.append(ml_pack["models"][("cat", label)].predict_proba(X)[:, 1])
+        for i, fn in enumerate(surv_funcs):
+            # S(t) = Probability of surviving past time t
+            # P(Fail in H | Alive at Age) = 1 - (S(Age + H) / S(Age))
+            
+            prob_survive_now = fn(current_age[i])
+            prob_survive_future = fn(current_age[i] + H)
+            
+            if prob_survive_now < 1e-5:
+                conditional_risk = 1.0
+            else:
+                conditional_risk = 1.0 - (prob_survive_future / prob_survive_now)
+            
+            pofs.append(np.clip(conditional_risk, 0, 1))
+            
+        out[f"ml_pof_{label}"] = pofs
         
-        if preds:
-            out[f"ml_pof_{label}"] = np.mean(np.vstack(preds), axis=0)
-    
     return out
 
 def compute_health_score(df: pd.DataFrame) -> pd.DataFrame:
     """
-    UPDATED: Uses Percentile-based scoring to ensure critical assets exist.
-    Logic: The worst 5% of assets get Health < 40, regardless of absolute PoF.
+    Compute Health Score from ACTUAL Probability of Failure
+    Uses absolute thresholds, NOT relative percentiles
     """
-    # 1. Consolidate PoF (Use Ensemble or Fallback)
-    if "PoF_Ensemble_12Ay" in df.columns:
-        risk_metric = df["PoF_Ensemble_12Ay"]
-    elif "rsf_pof_12ay" in df.columns:
-        risk_metric = df["rsf_pof_12ay"]
-    else:
-        # Fallback: Inverse of Health Score or raw hazard
-        risk_metric = df.get("cox_pof_12ay", df.get("ml_pof_12ay", pd.Series(0, index=df.index)))
-
-    # Handle NaNs
-    risk_metric = risk_metric.fillna(0)
-
-    # 2. Calculate Percentile Rank (0.0 to 1.0)
-    # Higher Risk = Higher Percentile (1.0 is worst)
-    # We group by Equipment Type to ensure we find worst Transformers AND worst Lines
-    # (Optional: remove groupby if you want global ranking)
-    df["Risk_Percentile"] = df.groupby("Ekipman_Tipi")[risk_metric.name].rank(pct=True)
     
-    # If groupby creates NaNs (single items), fill with 0.5
-    df["Risk_Percentile"] = df["Risk_Percentile"].fillna(0.5)
-
-    # 3. Map to Health Score (100 - 0)
-    # Worst asset (Percentile 1.0) -> Health 0
-    # Best asset (Percentile 0.0) -> Health 100
-    df["Health_Score"] = 100 * (1 - df["Risk_Percentile"])
+    # 1. Collect all 12-month PoF predictions
+    pof_cols = [c for c in df.columns if "_pof_" in c and "12ay" in c]
     
-    # 4. Assign Risk Classes (Executive-Safe Tiering)
-    def assign_tier(p):
-        if p >= 0.95: return "KRİTİK"   # Top 5% Worst
-        if p >= 0.80: return "YÜKSEK"   # Next 15%
-        if p >= 0.50: return "ORTA"     # Next 30%
-        return "DÜŞÜK"                  # Bottom 50% Safe
-
-    df["Risk_Sinifi"] = df["Risk_Percentile"].apply(assign_tier)
+    if not pof_cols:
+        # No predictions available
+        df["Health_Score"] = 50.0
+        df["Risk_Sinifi"] = "BİLİNMİYOR"
+        return df
     
-    # 5. Add Chronic Penalty (Optional but recommended)
-    # If an asset is "Chronic", cap its health score at 60 (Force it into High Risk)
+    # 2. Ensemble: Average available predictions
+    df["Mean_PoF_12ay"] = df[pof_cols].mean(axis=1, skipna=True)
+    
+    # 3. Convert PoF to Health (Inverse relationship)
+    # PoF=0% → Health=100 (Perfect)
+    # PoF=50% → Health=50 (Moderate)
+    # PoF=100% → Health=0 (Critical)
+    df["Health_Score"] = 100 * (1 - df["Mean_PoF_12ay"].clip(0, 1))
+    
+    # 4. Assign Risk Classes (Absolute Thresholds)
+    def assign_risk_class(health):
+        """
+        Industry-standard thresholds for asset health:
+        - 80-100: Low Risk (Good condition)
+        - 60-80: Medium Risk (Monitor)
+        - 40-60: High Risk (Schedule maintenance)
+        - 0-40: Critical (Immediate action)
+        """
+        if health >= 80: return "DÜŞÜK"
+        if health >= 60: return "ORTA"
+        if health >= 40: return "YÜKSEK"
+        return "KRİTİK"
+    
+    df["Risk_Sinifi"] = df["Health_Score"].apply(assign_risk_class)
+    
+    # 5. Chronic Penalty (Optional)
+    # Equipment with repeated failures should be flagged
     if "Chronic_Flag" in df.columns:
-        mask_chronic = df["Chronic_Flag"] == 1
-        df.loc[mask_chronic, "Health_Score"] = df.loc[mask_chronic, "Health_Score"].clip(upper=60)
-        df.loc[mask_chronic, "Risk_Sinifi"] = df.loc[mask_chronic, "Risk_Sinifi"].replace({"DÜŞÜK": "YÜKSEK", "ORTA": "YÜKSEK"})
-
+        chronic_mask = df["Chronic_Flag"] == 1
+        # Cap chronic equipment at "Medium Risk" minimum
+        df.loc[chronic_mask, "Health_Score"] = df.loc[chronic_mask, "Health_Score"].clip(upper=60)
+        # Upgrade risk class if needed
+        df.loc[chronic_mask & (df["Risk_Sinifi"] == "DÜŞÜK"), "Risk_Sinifi"] = "ORTA"
+    
     return df
-
 # =============================================================================
 # MAIN PIPELINE
 # =============================================================================
@@ -1490,104 +1624,91 @@ def main():
     ensure_dirs()
     logger = setup_logger()
     
-    # Load data (once!)
+    # -------------------------------------------------------------------------
+    # STEP 1: LOAD & CONFIGURE
+    # -------------------------------------------------------------------------
     logger.info("[STEP 1] Loading data...")
     df_fault = load_fault_data(logger)
     df_healthy = load_healthy_data(logger)
     
-    # --- AUTO-DETECT OBSERVATION START ---
-    # We take the earliest fault date as the start of reliable history
+    # Auto-detect start date from data
+    # This fixes the Left Truncation logic dynamically
     observation_start_date = df_fault["started at"].min()
     data_end_date = df_fault["started at"].max()
     
     logger.info(f"[CONFIG] Data range: {observation_start_date.date()} → {data_end_date.date()}")
-    logger.info(f"[CONFIG] Observation Start (for Delayed Entry): {observation_start_date.date()}")
+    logger.info(f"[CONFIG] Observation Start (Left Truncation): {observation_start_date.date()}")
     
-    # =============================================================================
-    # BACKTESTING (Proof that model doesn't cheat)
-    # =============================================================================
-    # Note: Backtester likely needs updates for dynamic start date too, but skipping for brevity
-    # as per request to focus on main pipeline logic.
-    
-    # =============================================================================
-    # PRODUCTION PIPELINE - SINGLE DATAFRAME APPROACH
-    # =============================================================================
+    # -------------------------------------------------------------------------
+    # STEP 2: BUILD DATASET
+    # -------------------------------------------------------------------------
     logger.info("\n" + "="*60)
     logger.info("PRODUCTION - Training on Full History")
     logger.info("="*60 + "\n")
     
     logger.info("[STEP 2] Building complete dataset...")
     
-    # Step 1: Build equipment master (has all base columns)
+    # 1. Master list
     equipment_master = build_equipment_master(df_fault, df_healthy, logger, data_end_date)
     
-    # Step 2: Filter faults ONCE
+    # 2. Filter Real Failures (Removing fuses/temporary faults)
     df_fault_filtered = filter_real_failures(df_fault, logger)
     
-    # Step 3: Add survival columns IN-PLACE (With Observation Start)
+    # 3. Add Survival Columns (Events, Duration, Delayed Entry)
     df_all = add_survival_columns_inplace(
         equipment_master.copy(), 
         df_fault_filtered, 
         data_end_date, 
-        observation_start_date, # <--- PASSED HERE
+        observation_start_date, 
         logger
     )
     
-    # Step 4: Calculate chronic features
+    # 4. Feature Engineering
     logger.info("[STEP 3] Engineering features...")
     chronic_df = compute_chronic_features(df_fault, data_end_date, logger)
     
-    # Step 5: Add temporal features IN-PLACE (With Observation Start)
     df_all = add_temporal_features_inplace(
         df_all, 
         data_end_date, 
         chronic_df, 
-        observation_start_date, # <--- PASSED HERE
+        observation_start_date, 
         logger
     )
     
-    # Define feature columns for modeling
+    # Define Feature Columns
     structural_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka"]
     structural_cols = [c for c in structural_cols if c in df_all.columns]
     
     temporal_cols = ["Tref_Yas_Gun", "Tref_Ay", "Ariza_Sayisi_90g", 
                      "Chronic_Rate_Yillik", "Chronic_Decay_Skoru", "Chronic_Flag",
-                     "Observation_Ratio"] # Added new feature
+                     "Observation_Ratio"]
     temporal_cols = [c for c in temporal_cols if c in df_all.columns]
     
-    logger.info(f"[DATASET] Single dataframe: {len(df_all)} rows × {len(df_all.columns)} cols")
-    logger.info(f"[DATASET] Structural features: {structural_cols}")
-    logger.info(f"[DATASET] Temporal features: {temporal_cols}")
-    logger.info(f"[DATASET] Has entry_days (Delayed Entry): {'entry_days' in df_all.columns}")
+    logger.info(f"[DATASET] Assets: {len(df_all)} | Features: {len(structural_cols) + len(temporal_cols)}")
 
-    # =============================================================================
-    # EQUIPMENT-STRATIFIED MODELING
-    # =============================================================================
-    logger.info("="*60)
-    logger.info("STEP 4 - Equipment-Stratified Modeling")
-    logger.info("="*60 + "\n")
+    # -------------------------------------------------------------------------
+    # STEP 3: TRAIN GLOBAL MODELS (FALLBACK)
+    # -------------------------------------------------------------------------
+    logger.info("\n[GLOBAL] Training fallback models (Cox, RSF, ML)...")
     
-    # Get equipment statistics
-    eq_stats = get_equipment_stats(df_all, equipment_master, logger)
-    
-    # Train global fallback models first
-    logger.info("\n[GLOBAL] Training fallback models...")
+    # 1. Global Cox
     X_cox_global = select_cox_safe_features(df_all, structural_cols, logger)
-    
-    # IMPORTANT: Update train_cox_weibull call to include entry_days
     cox_global, wb_global = train_cox_weibull(
         X_cox_global, 
         df_all["duration_days"], 
         df_all["event"], 
-        df_all["entry_days"], # <--- NEW ARGUMENT PASSED HERE
+        df_all["entry_days"],
         logger
     )
     
+    # 2. Global Random Survival Forest
     rsf_global = train_rsf_survival(df_all, structural_cols, logger)
     
+    # 3. Global ML (Gradient Boosting Survival)
     ml_features_global = structural_cols + [c for c in temporal_cols if c not in ["Kurulum_Tarihi"]]
     ml_pack_global = train_ml_models(df_all, ml_features_global, SURVIVAL_HORIZONS_DAYS, logger)
     
+    # Store global models for fallback usage
     global_models = {
         "cox": cox_global,
         "weibull": wb_global,
@@ -1595,8 +1716,17 @@ def main():
         "ml": ml_pack_global,
         "X_cox_cols": X_cox_global.columns.tolist()
     }
+
+    # -------------------------------------------------------------------------
+    # STEP 4: EQUIPMENT-STRATIFIED MODELING
+    # -------------------------------------------------------------------------
+    logger.info("\n" + "="*60)
+    logger.info("STEP 4 - Equipment-Stratified Modeling")
+    logger.info("="*60 + "\n")
     
-    # Train equipment-specific models
+    eq_stats = get_equipment_stats(df_all, equipment_master, logger)
+    unique_types = sorted(df_all["Ekipman_Tipi"].unique())
+    
     MIN_SAMPLES = 100
     MIN_EVENTS = 30
     
@@ -1604,144 +1734,144 @@ def main():
     all_marka_analyses = []
     all_bakim_analyses = []
     
-    for eq_type in sorted(df_all["Ekipman_Tipi"].unique()):
+    # Import TQDM for progress bar
+    from tqdm import tqdm
+    
+    for eq_type in tqdm(unique_types, desc="Training Equipment Models", unit="type"):
+        
+        # 1. Filter Data
         df_eq = df_all[df_all["Ekipman_Tipi"] == eq_type].copy()
-        stats = eq_stats[eq_type]
+        stats = eq_stats.get(eq_type, {'n_total': 0, 'n_events': 0, 'has_marka': 0})
         
-        logger.info(f"\n{'='*60}")
-        logger.info(f"[{eq_type}] N={stats['n_total']}, Events={stats['n_events']} ({100*stats['event_rate']:.1f}%)")
-        logger.info(f"{'='*60}")
-        
-        # Decide: Equipment-specific or global fallback
-        if stats["n_total"] < MIN_SAMPLES or stats["n_events"] < MIN_EVENTS:
-            logger.warning(f"[{eq_type}] Using global fallback (insufficient data)")
-            
-            # Use global models
-            preds = pd.DataFrame({"cbs_id": df_eq["cbs_id"]})
+        preds = pd.DataFrame({"cbs_id": df_eq["cbs_id"]})
+        model_source = "Equipment_Specific"
 
+        # 2. DECISION: Use Global Fallback vs Specific Training
+        if stats["n_total"] < MIN_SAMPLES or stats["n_events"] < MIN_EVENTS:
+            # --- GLOBAL FALLBACK (ENHANCED) ---
+            model_source = "Global_Fallback"
+            
+            # A) Global Cox Fallback
             try:
                 X_eq = select_cox_safe_features(df_eq, structural_cols, logger)
-            
-                # Fix: Align columns with global model
-                required_cols = global_models["X_cox_cols"]
-                missing_cols = set(required_cols) - set(X_eq.columns)
-                for c in missing_cols:
+                # Align features with global model
+                for c in set(global_models["X_cox_cols"]) - set(X_eq.columns):
                     X_eq[c] = 0
-                X_eq = X_eq[required_cols]
+                X_eq = X_eq[global_models["X_cox_cols"]]
                 
                 if cox_global:
                     cox_pred = predict_survival_pof(cox_global, X_eq, df_eq["duration_days"],
                                                     SURVIVAL_HORIZONS_DAYS, "cox", df_eq["cbs_id"])
                     preds = preds.merge(cox_pred, on="cbs_id", how="left")
-            except Exception as e:
-                logger.warning(f"[{eq_type}] Global Cox failed: {e}")
+            except Exception:
+                pass 
+
+            # B) Global RSF Fallback
+            try:
+                if rsf_global:
+                    rsf_pred = predict_rsf_pof(df_eq, rsf_global, structural_cols, SURVIVAL_HORIZONS_DAYS)
+                    preds = preds.merge(rsf_pred, on="cbs_id", how="left")
+            except Exception:
+                pass
+
+            # C) Global ML Fallback
+            try:
+                if ml_pack_global:
+                    # Note: predict_ml_pof should handle missing columns internally
+                    ml_pred = predict_ml_pof(df_eq, ml_pack_global, SURVIVAL_HORIZONS_DAYS)
+                    preds = preds.merge(ml_pred, on="cbs_id", how="left")
+            except Exception:
+                pass
+
+        else:
+            # --- SPECIFIC TRAINING ---
+            preds = train_equipment_specific_models(df_eq, structural_cols, temporal_cols, eq_type, logger)
+
+            # Specific Explanatory Analyses
+            if stats.get("has_marka", 0) >= 30:
+                try:
+                    marka_analysis = analyze_marka_effect(df_eq, eq_type, logger)
+                    if not marka_analysis.empty: all_marka_analyses.append(marka_analysis)
+                except Exception: pass
             
-            # Mark the model type
-            preds["Model_Type"] = "Global_Fallback"
-            preds["Ekipman_Tipi"] = eq_type
-            
-            all_predictions.append(preds)
-            continue # <--- Skip specific training
+            try:
+                bakim_analysis = analyze_bakim_effect(equipment_master, eq_type, logger)
+                if not bakim_analysis.empty: all_bakim_analyses.append(bakim_analysis)
+            except Exception: pass
+
+        # 3. MERGE PREDICTIONS WITH METADATA (FIXED)
+        # We merge 'preds' (which only has cbs_id + probabilities) back to df_eq metadata
+        meta_cols = ["cbs_id", "Ekipman_Tipi"]
+        if "Fault_Count" in df_eq.columns: meta_cols.append("Fault_Count")
         
-        # Train equipment-specific models
-        logger.info(f"[{eq_type}] Training equipment-specific models...")
-        preds = train_equipment_specific_models(df_eq, structural_cols, temporal_cols, eq_type, logger)
-        preds["Model_Type"] = "Equipment_Specific"
-        preds["Ekipman_Tipi"] = eq_type
-        all_predictions.append(preds)
+        preds_full = df_eq[meta_cols].merge(preds, on="cbs_id", how="left")
+        preds_full["Model_Type"] = model_source
         
-        # Explanatory analyses
-        if stats["has_marka"] >= 30:
-            marka_analysis = analyze_marka_effect(df_eq, eq_type, logger)
-            if not marka_analysis.empty:
-                all_marka_analyses.append(marka_analysis)
+        # 4. COMPUTE HEALTH SCORE
+        # Now preds_full definitely has "Ekipman_Tipi", so grouping works
+        try:
+            preds_full = compute_health_score(preds_full)
+        except Exception as e:
+            logger.error(f"[{eq_type}] Health score calc failed: {e}")
+            preds_full["Health_Score"] = 50 
+            preds_full["Risk_Sinifi"] = "ORTA"
+
+        # 5. Store Results
+        all_predictions.append(preds_full)
         
-        bakim_analysis = analyze_bakim_effect(equipment_master, eq_type, logger)
-        if not bakim_analysis.empty:
-            all_bakim_analyses.append(bakim_analysis)
-        
-        # Save per-equipment output
-        preds_full = df_eq[["cbs_id", "Ekipman_Tipi", "Fault_Count"]].merge(preds, on="cbs_id", how="left")
-        preds_full = compute_health_score(preds_full)
-        
-        safe_name = eq_type.replace("/", "_").replace(" ", "_")
+        # Save individual CSV (Silent to keep progress bar clean)
+        safe_name = str(eq_type).replace("/", "_").replace(" ", "_")
         out_path = os.path.join(OUTPUT_DIR, f"pof_{safe_name}.csv")
         preds_full.to_csv(out_path, index=False, encoding="utf-8-sig")
-        logger.info(f"[{eq_type}] Saved: {out_path}")
-    
-    # =============================================================================
-    # ENSEMBLE & FINAL OUTPUT
-    # =============================================================================
+
+    # -------------------------------------------------------------------------
+    # STEP 5: FINALIZE
+    # -------------------------------------------------------------------------
     logger.info("\n" + "="*60)
-    logger.info("STEP 5 - Final Ensemble")
+    logger.info("STEP 5 - Final Ensemble & Reporting")
     logger.info("="*60 + "\n")
     
     if not all_predictions:
-        logger.error("[ERROR] No predictions generated!")
+        logger.error("No predictions generated.")
         return
-    
-    # Combine all equipment types
+
+    # Combine all
     predictions = pd.concat(all_predictions, ignore_index=True)
-    logger.info(f"[ENSEMBLE] Combined {len(predictions)} predictions from {len(all_predictions)} equipment types")
     
-    # Compute health scores
-    predictions = compute_health_score(predictions)
-    
-    # Add reporting columns
+    # Final Report Merge (Add context like Voltage, Install Date)
     report_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Fault_Count", "Kurulum_Tarihi"]
-    report = df_all[["cbs_id"] + [c for c in report_cols if c in df_all.columns]].drop_duplicates("cbs_id")
+    report_base = df_all[["cbs_id"] + [c for c in report_cols if c in df_all.columns]].drop_duplicates("cbs_id")
     
-    preds_clean = predictions.drop(columns=["Ekipman_Tipi"], errors="ignore")
-    report = report.merge(preds_clean, on="cbs_id", how="left")
+    # Clean duplicates before merge
+    cols_to_drop = [c for c in report_cols if c in predictions.columns]
+    preds_clean = predictions.drop(columns=cols_to_drop, errors="ignore")
     
-    # Save main output
+    report = report_base.merge(preds_clean, on="cbs_id", how="left")
+    
+    # Save outputs
     out_path = os.path.join(OUTPUT_DIR, "pof_predictions_final.csv")
     report.to_csv(out_path, index=False, encoding="utf-8-sig")
     logger.info(f"[OUTPUT] Main predictions: {out_path}")
     
-    # Save explanatory analyses
     if all_marka_analyses:
-        marka_combined = pd.concat(all_marka_analyses, ignore_index=True)
-        marka_path = os.path.join(OUTPUT_DIR, "marka_analysis.csv")
-        marka_combined.to_csv(marka_path, index=False, encoding="utf-8-sig")
-        logger.info(f"[OUTPUT] Marka analysis: {marka_path}")
+        pd.concat(all_marka_analyses).to_csv(os.path.join(OUTPUT_DIR, "marka_analysis.csv"), index=False, encoding="utf-8-sig")
     
     if all_bakim_analyses:
-        bakim_combined = pd.concat(all_bakim_analyses, ignore_index=True)
-        bakim_path = os.path.join(OUTPUT_DIR, "bakim_analysis.csv")
-        bakim_combined.to_csv(bakim_path, index=False, encoding="utf-8-sig")
-        logger.info(f"[OUTPUT] Bakim analysis: {bakim_path}")
+        pd.concat(all_bakim_analyses).to_csv(os.path.join(OUTPUT_DIR, "bakim_analysis.csv"), index=False, encoding="utf-8-sig")
     
-    # Save intermediate files
+    # Save intermediate files for Reporting Script
     equipment_master.to_csv(os.path.join(OUTPUT_DIR, "equipment_master.csv"), index=False, encoding="utf-8-sig")
-    
-    # Use df_all instead of survival_base/features_all since they are merged
     df_all.to_csv(os.path.join(OUTPUT_DIR, "model_input_data_full.csv"), index=False, encoding="utf-8-sig")
     
-    # Summary statistics
+    # Final Stats
     critical = (report["Health_Score"] < 40).sum()
     mean_health = report["Health_Score"].mean()
     
-    logger.info("\n" + "="*60)
-    logger.info("PIPELINE COMPLETE")
-    logger.info("="*60)
     logger.info(f"Total assets: {len(report):,}")
     logger.info(f"Critical assets (Health<40): {critical:,} ({100*critical/len(report):.1f}%)")
     logger.info(f"Mean Health Score: {mean_health:.1f}")
-
-    # Check if Ekipman_Tipi exists in report
-    ekip_col = None
-    for col in report.columns:
-        if "Ekipman_Tipi" in col:
-            ekip_col = col
-            break
-
-    if ekip_col:
-        logger.info(f"Equipment types: {report[ekip_col].nunique()}")
-    else:
-        logger.info(f"Equipment types: {df_all['Ekipman_Tipi'].nunique()}")
-
     logger.info("="*60)
+    logger.info("PIPELINE COMPLETE")
     
 if __name__ == "__main__":
     main()

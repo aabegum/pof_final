@@ -1,175 +1,176 @@
-Sonuçlandırdığımız `pof_single_hybrid_clean_v2.py` betiğine ve başarılı üretim çalışmasına dayanarak, işte güncellenen **Teknik Dokümantasyonun (v2.0)** Türkçe versiyonu.
+PoF3 – Varlık Arıza Riski Analizi
 
-Bunu **`PROJE_DOKUMANTASYONU_v2.md`** olarak kaydedebilirsiniz. "Gerçek Arıza" mantığını, Küresel Yedek (Global Fallback) mekanizmasını ve sonuçların nasıl yorumlanacağını doğru bir şekilde yansıtmaktadır.
+(Probability of Failure – Göreceli Risk Yaklaşımı)
 
----
+1. Amaç ve Kapsam
 
-# PoF3 - Varlık Arıza Tahmin Sistemi
+Bu çalışma, elektrik dağıtım şebekesindeki varlıkların (Trafo, Ayırıcı, Hat, Sigorta, vb.) gelecekte arıza yaşama risklerini istatistiksel yöntemlerle göreceli olarak sıralamak amacıyla geliştirilmiştir.
 
-## Teknik Dokümantasyon & Metodoloji Rehberi (v2.0)
+Modelin temel hedefi:
 
-**Versiyon:** 2.0 (Temiz Üretim / Clean Production)
-**Tarih:** Aralık 2025
-**Pipeline Betiği:** `pof_single_hybrid_clean_v2.py`
+“Hangi varlıklar, benzerlerine kıyasla daha yüksek arıza riski taşımaktadır?”
 
----
+Bu analiz;
 
-## 1. Proje Özeti
+bakım önceliklendirme,
 
-**PoF3 (Arıza Olasılığı)** sistemi, elektrik dağıtım şebekesindeki fiziksel varlık arızalarının olasılığını tahmin etmek için tasarlanmış hibrit bir güvenilirlik analiz hattıdır.
+saha denetim planlaması,
 
-### Kritik Stratejik Değişiklik (v2.0)
+CAPEX/OPEX karar destek süreçleri
 
-Önceki versiyonların aksine (kesintileri ve sigorta atıklarını tahmin etmeye çalışan), **v2.0 "Koruma Operasyonları" ile "Fiziksel Arızaları" kesin bir şekilde birbirinden ayırır**.
+için kullanılmak üzere tasarlanmıştır.
 
-* **Amaç:** Gerçek varlık yaşlanmasını ve katastrofik arızaları tahmin etmek.
-* **Hedef (Target):** `event = 1` sadece fiziksel arızalar için atanır (örn. "Trafo Arızası", "İletken Kopması").
-* **Hariç Tutma:** Koruma operasyonları (örn. "Sigorta Atığı") hedef değişkenden çıkarılır ancak **Kronik Stres Özellikleri** (tahminleyici/predictor) olarak modele geri beslenir.
+2. Temel Kavramlar (Yanlış Anlaşılmaması İçin)
+2.1. Arıza Kaydı ≠ Fiziksel Arıza
 
----
+EDAŞ sistemlerinde yer alan tüm arıza/kesinti kayıtları fiziksel ekipman arızasını temsil etmez.
 
-## 2. Sistem Mimarisi
+Bu nedenle çalışmada:
 
-Sistem, hem verisi bol varlıkları (Ayırıcılar gibi) hem de verisi az varlıkları (Trafolar gibi) aynı hat üzerinde işleyebilmek için **Tek Geçişli Hibrit Mimari (Single-Pass Hybrid Architecture)** kullanır.
+sigorta atması,
 
-```mermaid
-graph TD
-    A[Ham Veri: Arızalar & Varlıklar] --> B{Filtre: Gerçek Arıza mı?}
-    B -- Evet (Hedef) --> C[Sağkalım Veri Tabanı]
-    B -- Hayır (Sigorta Atığı) --> D[Kronik Özellikler]
-    C & D --> E[Ana Veri Seti - Master]
-    E --> F{Veri Yeterliliği Kontrolü}
-    F -- Yeterli Veri (N>100) --> G[Ekipmana Özel Modeller]
-    F -- Yetersiz Veri (Trafo/Pano) --> H[Küresel Yedek Model - Global Fallback]
-    G & H --> I[Sağkalım Eğrileri (Cox/RSF)]
-    I --> J[PoF Hesaplaması (12ay/24ay)]
-    J --> K[Final Ensemble & Raporlama]
+pano kol sigortası,
 
-```
+operasyonel açma-kapamalar,
 
-### Temel Bileşenler
+dış etken kaynaklı kesintiler
 
-1. **Sağkalım Modelleri (Ana Model):** Cox Orantılı Tehlikeler (CoxPH) ve Rastgele Sağkalım Ormanları (RSF), tüm varlık ömrü boyunca riski tahmin eder.
-2. **Küresel Yedek Model (Global Fallback):** Nadir arıza yapan ekipmanlar (örn. Trafolar) için *tüm* varlık havuzundan öğrenilen genel bir "yaşlanma eğrisi" oluşturur.
-3. **Kronik Skorlama:** Tekrarlayan koruma cihazı operasyonlarına dayalı bir "Stres Skoru" hesaplayan ayrı bir modüldür (IEEE 1366 mantığına benzer).
+modelden hariç tutulmuştur.
 
----
+📌 Sadece gerçek ekipman arızalarını temsil eden kayıtlar analiz kapsamına alınmıştır.
 
-## 3. Metodoloji & Mantık
+2.2. Model “Ne Zaman” Değil, “Hangisi” Sorusunu Yanıtlar
 
-### 3.1 Arıza Tanımı (Failure Definition)
+Bu model:
 
-Pipeline, girdi verilerini katı bir "neden kodu beyaz listesi" (whitelist) kullanarak otomatik olarak filtreler.
+“Bu trafo yarın arızalanır mı?” sorusuna cevap vermez.
 
-| Kategori | Durum | Örnekler | Gerekçe |
-| --- | --- | --- | --- |
-| **Fiziksel Arıza** | **HEDEF (Target)** | *Trafo Arızası, İletken Kopması, Direk Kırılması* | Varlık tamir veya değişim gerektirir. |
-| **Koruma Operasyonu** | **HARİÇ** | *Sigorta Atığı, Termik Açması, TMS Açması* | Varlık şebekeyi korumak için doğru çalışmıştır. |
-| **Dışsal/Diğer** | **HARİÇ** | *3. Şahıs Hasarı, Planlı Bakım* | İçsel yaşlanma arızası değildir. |
+“Bu trafo, diğer trafolara göre daha mı risklidir?” sorusunu yanıtlar.
 
-### 3.2 Ekipman Sınıflandırması (Stratification)
+Dolayısıyla model çıktıları:
 
-Pipeline, her ekipman tipi için hangi modelleme stratejisinin kullanılacağına otomatik karar verir:
+mutlak tarih tahmini değil,
 
-* **Özel Model (Tier 1):** **>100 örnek** ve **>30 arıza** geçmişi olan varlıklar için.
-* *Örnek:* Ayırıcı.
-* *Sonuç:* Yüksek hassasiyetli, o ekipmana özel tahminler.
+göreceli risk sıralamasıdır.
 
+3. Kullanılan Yöntemler (Özet)
+3.1. Sağkalım Analizi (Survival Analysis)
 
-* **Küresel Yedek Model (Tier 2):** Yetersiz geçmişe sahip varlıklar için.
-* *Örnek:* Trafo, Pano.
-* *Sonuç:* Filo ortalamasından türetilen baz risk profili.
+Modelin omurgasını şu yöntemler oluşturur:
 
+Cox Oransal Tehlike Modeli
 
+Weibull Parametrik Model
 
-### 3.3 "Bebek Ölümleri" Filtresi (ML Skip)
+Random Survival Forest (RSF)
 
-Loglarda `[ML] Skipping 12ay: insufficient positives` göreceksiniz.
+Bu yöntemler sayesinde:
 
-* **Sebep:** Makine Öğrenmesi sınıflandırıcıları (XGBoost), belirli bir ufuk içinde (örn. 1 yaşından önce) arıza yapan "Eğitim Örnekleri"ne ihtiyaç duyar.
-* **Gerçeklik:** Dağıtım varlıkları nadiren çok genç yaşta arıza yapar. Çoğu arıza 20+ yaşta gerçekleşir.
-* **Çözüm:** Pipeline, aşırı uyumlamayı (overfitting) önlemek için bu sınıflandırıcıları bilerek atlar. **PoF (Arıza Olasılığı), yalnızca Sağkalım Modellerinden (Cox/RSF) türetilir.** Bu modeller, "genç yaşta arıza" verisine ihtiyaç duymadan, yaşlı varlıklar için riski matematiksel olarak hesaplayabilir.
+ekipman yaşı,
 
----
+kronik arıza davranışı,
 
-## 4. Çalıştırma Adımları (Execution Steps)
+gözlem süresi farklılıkları
 
-### Adım 1: Veri Yükleme & Temizleme
+istatistiksel olarak doğru şekilde ele alınmıştır.
 
-* `ariza_final.xlsx` ve `saglam_final.xlsx` dosyalarını yükler.
-* **Otomatik Temizleme:** Süreleri dakikaya çevirir, ID'leri normalleştirir, Türkçe tarih formatlarını ayrıştırır (parse).
+3.2. Gecikmeli Giriş (Delayed Entry)
 
-### Adım 2: Özellik Mühendisliği (Feature Engineering)
+Veri seti 2021 yılından başladığı için, 2021 öncesi kurulmuş ekipmanların geçmişi kısmen bilinmemektedir.
 
-* **Yapısal:** Gerilim Seviyesi, Marka, Kurulum Tarihi.
-* **Zamansal:** Yaş (`Tref_Yas_Gun`), Mevsimsellik.
-* **Kronik:** `Chronic_Index` hesaplar (sigorta atıklarının ağırlıklı frekansı).
-* *Not:* Bir Trafo hiç fiziksel arıza yapmasa bile, yüksek Kronik İndeks onun risk skorunu artıracaktır.
+Bu durum, Gecikmeli Giriş (Delayed Entry) yaklaşımı ile çözülmüştür.
 
+Anlamı şudur:
 
+“Bir ekipmanın 2021 öncesinde arızalanıp arızalanmadığı bilinmiyor; ancak 2021’den sonra hayatta kaldığı biliniyor.”
 
-### Adım 3: Model Eğitimi (The "Continue" Fix)
+Bu yöntem, eski ekipmanların riskinin yapay olarak düşük görünmesini engeller.
 
-* Her ekipman tipi için döngü çalışır.
-* `stats['n_events']` kontrol edilir.
-* **Veri Yetersizse:** Küresel Model kullanılır → Tahminler üretilir → **`continue`** (özel model eğitimi atlanır).
-* **Veri Yeterliyse:** Ekipmana özel Cox/RSF/Weibull modelleri eğitilir.
+3.3. Kronik Arıza Analizi
 
-### Adım 4: Güvenlik Kontrolleri
+Son 90 gün içinde:
 
-* **VIF Filtreleme:** Sonsuz varyans enflasyon faktörüne sahip (örn. tek bir gerilim seviyesi varsa) özellikleri otomatik olarak düşürür.
-* **Sabit Sütun Düşürme:** Cox regresyonunda "Singular Matrix" hatalarını önler.
+sık arızalanan,
 
----
+tekrar eden problem gösteren
 
-## 5. Çıktı Dosyaları ve Yorumlama
+ekipmanlar kronik olarak işaretlenmiştir.
 
-Tüm çıktılar `data/sonuclar/` klasörüne kaydedilir.
+Kronik ekipmanlar:
 
-| Dosya Adı | Açıklama | Kullanılacak Ana Sütunlar |
-| --- | --- | --- |
-| **`pof_predictions_final.csv`** | **ANA RAPOR.** Tüm varlıklar için birleştirilmiş sonuçlar. | `cox_pof_12ay`, `rsf_pof_12ay`, `Health_Score`, `Chronic_Index` |
-| `pof_Ayırıcı.csv` | Ayırıcılar için detaylı sonuçlar. | `rsf_pof_12ay` (En yüksek doğruluk) |
-| `model_input_data_full.csv` | Hata ayıklama dosyası. Eğitim için kullanılan matris. | Tüm özellikler + `event` + `duration_days` |
-| `marka_analysis.csv` | Marka güvenilirliğinin istatistiksel dökümü. | `Failure_Rate`, `Median_Age` |
+sağlık skorunda cezalandırılır,
 
-### Tahminleri Nasıl Okumalısınız?
+risk sınıfı otomatik olarak yükseltilir.
 
-| Ekipman | Kullanılan Model | Güvenilirlik | Yorumlama Rehberi |
-| --- | --- | --- | --- |
-| **Ayırıcı** | **Özel (RSF/Cox)** | ⭐⭐⭐⭐⭐ (Yüksek) | 3ay/6ay/12ay sütunlarını güvenle kullanın. Model performansı gayet iyi (Uyum Skoru ~0.65). |
-| **Hat** | **Özel (Cox)** | ⭐⭐⭐ (Orta) | Risk ikilidir (0 ya da 1). Yüksek skorlar "anlık riski" gösterir ancak zaman ufku (3 ay vs 6 ay) çok ayırt edici olmayabilir. |
-| **Trafo** | **Küresel Yedek** | ⭐⭐ (Baz Seviye) | Skorlar filo genelinde benzer olacaktır. Bakım önceliği için **Kronik İndeks** sütununu kullanın. |
-| **Sigorta** | **Özel** | ⭐ (Düşük) | "Arızalar" tamamen rastgeledir. Tahminleyici bakım için kullanmayın, sadece stok planlaması için kullanın. |
+4. Sağlık Skoru (Health Score) Nasıl Hesaplanır?
+4.1. Mutlak Olasılık Neden Kullanılmıyor?
 
----
+Fiziksel ekipman arızaları nadir olaylardır.
+Bu nedenle mutlak arıza olasılıkları genellikle çok düşüktür (%0.1 – %1 gibi).
 
-## 6. Sorun Giderme (Troubleshooting)
+Bu durum, tüm ekipmanların “çok sağlıklı” görünmesine yol açar.
 
-### Yaygın Loglar ve Anlamları
+📌 Bu yüzden mutlak olasılık değil, göreceli risk kullanılmıştır.
 
-**`[ML] Skipping 12ay: insufficient positives (11)`**
+4.2. Göreceli Risk (Percentile Yaklaşımı)
 
-* **Durum:** Normal / Beklenen.
-* **Anlamı:** İkili sınıflandırıcı eğitmek için yeterli sayıda "genç" arıza yok. Sistem bunun yerine Sağkalım Modellerini kullanıyor.
+Her ekipman, kendi türü içindeki diğer ekipmanlarla karşılaştırılır.
 
-**`[VIF] Dropping Gerilim_Seviyesi (VIF=inf)`**
+Örnek:
 
-* **Durum:** Normal / Sağlıklı.
-* **Anlamı:** Sistem gereksiz/tekrarlayan veriyi (örn. sadece tek bir gerilim seviyesi var) tespit etti ve çökmemek için o sütunu sildi.
+Bir trafo, diğer trafolar arasında %95’lik risk dilimindeyse KRİTİK kabul edilir.
 
-**`[Trafo] Global Cox failed: ...`**
+Bu, mutlak arıza olasılığı düşük olsa bile geçerlidir.
 
-* **Durum:** Yönetildi (Handled).
-* **Anlamı:** Küresel model bile veri şekliyle (shape) zorlandı. Sistem bu varlık için baz bir tahmin (Health=100) atadı ancak varlığı işaretledi.
+5. Risk Sınıfları (EDAŞ Uyumlu)
+Risk Sınıfı	Tanım	İstatistiksel Karşılık	Önerilen Aksiyon
+KRİTİK	Acil İlgi Gerektirir	En riskli %5	🔴 Derhal saha kontrolü / yenileme planı
+YÜKSEK	Yakın Takip	Sonraki %15	🟠 Bakım sıklığı artırılmalı
+ORTA	Standart Risk	Sonraki %30	🟡 Rutin bakım
+DÜŞÜK	Sağlıklı	En iyi %50	🟢 Müdahale gerekmez
 
-### Kritik Varlık Tanımı
+📌 “KRİTİK” etiketi yarın arıza olacak anlamına gelmez.
+📌 “KRİTİK”, benzerleri arasında en riskli anlamına gelir.
 
-* **Mevcut Kod Mantığı:** `Health_Score < 40` (PoF > %60).
-* **Tavsiye:** Nihai raporda veya gösterge panelinde (dashboard), "Kritik" tanımını kodlanmış 40 eşiği yerine **Risk Skorlarının En Yüksek %5'lik Dilimi** olarak belirleyin. Dağıtım varlıkları pratikte nadiren %60 arıza olasılığına ulaşmadan önce değiştirilirler.
+6. Model Sonuçlarının Doğru Kullanımı
+Yapılması Gerekenler ✅
 
----
+Risk sınıflarını önceliklendirme amacıyla kullanmak
 
-**İletişim:** Teknik Analitik Ekibi
-**Bakım Sorumlusu:** Begüm Orhan
-**Lisans:** Kurumsal İç Kullanım (Internal Enterprise Use)
+KRİTİK ve YÜKSEK varlıkları saha planına almak
+
+Marka, bakım ve kronik analizlerini destekleyici bilgi olarak görmek
+
+Yapılmaması Gerekenler ❌
+
+“Bu varlık kesin arızalanacak” yorumu yapmak
+
+Tek bir varlık için tarih tahmini istemek
+
+Sağlık skorunu mutlak bir ölçü gibi kullanmak
+
+7. Veri Kısıtları ve Notlar
+
+Analiz dönemi: 2021 – 2025
+
+2021 öncesi arıza geçmişi bilinmemektedir.
+
+Sonuçlar, mevcut veri kalitesi ile sınırlıdır.
+
+Model, zamanla yeni verilerle yeniden eğitilmelidir.
+
+8. Sonuç
+
+Bu çalışma, EDAŞ varlık yönetimi süreçlerinde:
+
+sezgisel kararları sayısallaştıran,
+
+riskleri görünür hale getiren,
+
+bakım ve yatırım kararlarını destekleyen
+
+karar destek sistemi olarak tasarlanmıştır.
+
+Amaç:
+
+“Arızayı kesin tahmin etmek değil, en doğru yere bakmayı sağlamak.”
