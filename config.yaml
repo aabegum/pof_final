@@ -28,22 +28,22 @@ intermediate_paths:
   model_input_data_full: model_input_data_full.csv
 
 output_paths:
-  ariza_kayitlari: data/sonuclar/ariza_kayitlari.csv
-  ekipman_listesi: data/sonuclar/ekipman_listesi.csv
-  sagkalim_taban: data/sonuclar/sagkalim_taban.csv
-  saglam_ekipman_listesi: data/sonuclar/saglam_ekipman_listesi.csv
-  chronic_summary: data/sonuclar/chronic_equipment_summary.csv
-  chronic_only: data/sonuclar/chronic_equipment_only.csv
-  cox_3ay: data/sonuclar/cox_sagkalim_3ay_ariza_olasiligi.csv
-  cox_6ay: data/sonuclar/cox_sagkalim_6ay_ariza_olasiligi.csv
-  cox_12ay: data/sonuclar/cox_sagkalim_12ay_ariza_olasiligi.csv
-  cox_24ay: data/sonuclar/cox_sagkalim_24ay_ariza_olasiligi.csv
-  rsf_3ay: data/sonuclar/rsf_sagkalim_3ay_ariza_olasiligi.csv
-  rsf_6ay: data/sonuclar/rsf_sagkalim_6ay_ariza_olasiligi.csv
-  rsf_12ay: data/sonuclar/rsf_sagkalim_12ay_ariza_olasiligi.csv
-  rsf_24ay: data/sonuclar/rsf_sagkalim_24ay_ariza_olasiligi.csv
-  ensemble: data/sonuclar/ensemble_pof_final.csv
-  final_risk_report_xlsx: data/sonuclar/FINAL_ASSET_RISK_REPORT.xlsx
+  ariza_kayitlari: ariza_kayitlari.csv
+  ekipman_listesi: ekipman_listesi.csv
+  sagkalim_taban: sagkalim_taban.csv
+  saglam_ekipman_listesi: saglam_ekipman_listesi.csv
+  chronic_summary: chronic_equipment_summary.csv
+  chronic_only: chronic_equipment_only.csv
+  cox_3ay: cox_sagkalim_3ay_ariza_olasiligi.csv
+  cox_6ay: cox_sagkalim_6ay_ariza_olasiligi.csv
+  cox_12ay: cox_sagkalim_12ay_ariza_olasiligi.csv
+  cox_24ay: cox_sagkalim_24ay_ariza_olasiligi.csv
+  rsf_3ay: rsf_sagkalim_3ay_ariza_olasiligi.csv
+  rsf_6ay: rsf_sagkalim_6ay_ariza_olasiligi.csv
+  rsf_12ay: rsf_sagkalim_12ay_ariza_olasiligi.csv
+  rsf_24ay: rsf_sagkalim_24ay_ariza_olasiligi.csv
+  ensemble: ensemble_pof_final.csv
+  final_risk_report_xlsx: FINAL_ASSET_RISK_REPORT.xlsx
 
 # ============================
 # ANALYSIS

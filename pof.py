@@ -343,19 +343,19 @@ def load_fault_data(logger: logging.Logger) -> pd.DataFrame:
     """Load and clean fault records"""
     path = DATA_PATHS["fault_data"]
     logger.info(f"[LOAD] Fault data: {path}")
-    
+
     df = pd.read_excel(path)
     df.columns = [c.strip() for c in df.columns]
-    
+
     # Select essential columns
-    base_cols = ["cbs_id", "Şebeke Unsuru", "Sebekeye_Baglanma_Tarihi", 
+    base_cols = ["cbs_id", "Şebeke Unsuru", "Sebekeye_Baglanma_Tarihi",
                  "started at", "ended at", "duration time", "cause code"]
-    maint_cols = ["Bakım Sayısı", "Son Bakım İş Emri Tarihi", "MARKA", 
+    maint_cols = ["Bakım Sayısı", "Son Bakım İş Emri Tarihi", "MARKA",
                   "kVA_Rating", "component_voltage", "voltage_level"]
-    
+
     use_cols = [c for c in base_cols + maint_cols if c in df.columns]
     df = df[use_cols].copy()
-    
+
     # Rename
     df = df.rename(columns={
         "Şebeke Unsuru": "Ekipman_Tipi",
@@ -367,52 +367,62 @@ def load_fault_data(logger: logging.Logger) -> pd.DataFrame:
         "component_voltage": "Gerilim_Seviyesi",
         "voltage_level": "Gerilim_Sinifi",
     })
-    
+
     # Parse dates
     df["Kurulum_Tarihi"] = df["Kurulum_Tarihi"].apply(parse_date_safely)
     df["started at"] = df["started at"].apply(parse_date_safely)
     df["ended at"] = df["ended at"].apply(parse_date_safely)
     df["Süre_Dakika"] = convert_duration_minutes(df["Süre_Ham"], logger)
     df["Ekipman_Tipi"] = clean_equipment_type(df["Ekipman_Tipi"])
-    
+
     # Filter invalid records
     original = len(df)
     df = df[df["cbs_id"].notna()].copy()
     df["cbs_id"] = df["cbs_id"].astype(str).str.lower().str.strip()
-    
+
     df = df[
         df["Kurulum_Tarihi"].notna() &
         df["started at"].notna() &
         df["ended at"].notna() &
         df["Süre_Dakika"].notna()
     ].copy()
-    
+
     logger.info(f"[LOAD] Fault records: {len(df)}/{original} ({100*len(df)/original:.1f}%)")
+
+    # Save intermediate output
+    df.to_csv(INTERMEDIATE_PATHS["fault_events_clean"], index=False, encoding="utf-8-sig")
+    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['fault_events_clean']}")
+
     return df
 
 def load_healthy_data(logger: logging.Logger) -> pd.DataFrame:
     """Load healthy equipment (no fault history)"""
     path = DATA_PATHS["healthy_data"]
     logger.info(f"[LOAD] Healthy data: {path}")
-    
+
     df = pd.read_excel(path)
     df.columns = [c.strip() for c in df.columns]
-    
+
     if "cbs_id" not in df.columns:
         df = df.rename(columns={"ID": "cbs_id"})
-    
+
     df["cbs_id"] = df["cbs_id"].astype(str).str.lower().str.strip()
     df = df.rename(columns={
         "Şebeke Unsuru": "Ekipman_Tipi",
         "Sebekeye_Baglanma_Tarihi": "Kurulum_Tarihi",
         "MARKA": "Marka",
     })
-    
+
     df["Kurulum_Tarihi"] = df["Kurulum_Tarihi"].apply(parse_date_safely)
     df["Ekipman_Tipi"] = clean_equipment_type(df["Ekipman_Tipi"])
     df = df[df["Kurulum_Tarihi"].notna() & df["cbs_id"].notna()].copy()
-    
+
     logger.info(f"[LOAD] Healthy equipment: {len(df)}")
+
+    # Save intermediate output
+    df.to_csv(INTERMEDIATE_PATHS["healthy_equipment_clean"], index=False, encoding="utf-8-sig")
+    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['healthy_equipment_clean']}")
+
     return df
 
 # =============================================================================
@@ -1684,34 +1694,53 @@ def main():
     
     # 3. Add Survival Columns (Events, Duration, Delayed Entry)
     df_all = add_survival_columns_inplace(
-        equipment_master.copy(), 
-        df_fault_filtered, 
-        data_end_date, 
-        observation_start_date, 
+        equipment_master.copy(),
+        df_fault_filtered,
+        data_end_date,
+        observation_start_date,
         logger
     )
-    
+
+    # Save survival base intermediate
+    df_all.to_csv(INTERMEDIATE_PATHS["survival_base"], index=False, encoding="utf-8-sig")
+    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['survival_base']}")
+
     # 4. Feature Engineering
     logger.info("[STEP 3] Engineering features...")
     chronic_df = compute_chronic_features(df_fault, data_end_date, logger)
     
     df_all = add_temporal_features_inplace(
-        df_all, 
-        data_end_date, 
-        chronic_df, 
-        observation_start_date, 
+        df_all,
+        data_end_date,
+        chronic_df,
+        observation_start_date,
         logger
     )
-    
+
     # Define Feature Columns
     structural_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka"]
     structural_cols = [c for c in structural_cols if c in df_all.columns]
-    
-    temporal_cols = ["Tref_Yas_Gun", "Tref_Ay", "Ariza_Sayisi_90g", 
+
+    temporal_cols = ["Tref_Yas_Gun", "Tref_Ay", "Ariza_Sayisi_90g",
                      "Chronic_Rate_Yillik", "Chronic_Decay_Skoru", "Chronic_Flag",
                      "Observation_Ratio"]
     temporal_cols = [c for c in temporal_cols if c in df_all.columns]
-    
+
+    # Save feature outputs
+    if structural_cols:
+        df_all[["cbs_id"] + structural_cols].to_csv(INTERMEDIATE_PATHS["features_structural"], index=False, encoding="utf-8-sig")
+        logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['features_structural']}")
+
+    if temporal_cols:
+        df_all[["cbs_id"] + temporal_cols].to_csv(INTERMEDIATE_PATHS["features_temporal"], index=False, encoding="utf-8-sig")
+        logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['features_temporal']}")
+
+    # Save combined feature set (ozellikler_pof3)
+    all_feature_cols = ["cbs_id"] + structural_cols + temporal_cols + ["event", "duration_days", "entry_days"]
+    all_feature_cols = [c for c in all_feature_cols if c in df_all.columns]
+    df_all[all_feature_cols].to_csv(INTERMEDIATE_PATHS["ozellikler_pof3"], index=False, encoding="utf-8-sig")
+    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['ozellikler_pof3']}")
+
     logger.info(f"[DATASET] Assets: {len(df_all)} | Features: {len(structural_cols) + len(temporal_cols)}")
 
     # -------------------------------------------------------------------------
