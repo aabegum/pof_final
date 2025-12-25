@@ -341,7 +341,7 @@ def generate_case_studies(df_risk, logger):
 
     # Tarih parse et
     if 'Ariza_Baslangic_Zamani' in events.columns:
-        events['Ariza_Baslangic_Zamani'] = pd.to_datetime(events['Ariza_Baslangic_Zamani'], errors='coerce')
+        events['Ariza_Baslangic_Zamani'] = pd.to_datetime(events['Ariza_Baslangic_Zamani'], errors='coerce', dayfirst=True)
     else:
         return pd.DataFrame()
 
@@ -359,17 +359,20 @@ def generate_case_studies(df_risk, logger):
 
     # Risk verisiyle birleştir
     df_risk = ensure_pof_column(df_risk, logger)
-    
+
+    # FIX: Ensure cbs_id types match before merge
+    df_risk['cbs_id'] = df_risk['cbs_id'].astype(str).str.lower().str.strip()
+
     risk_col = 'Risk_Class' if 'Risk_Class' in df_risk.columns else 'Risk_Sinifi'
     cols_to_merge = ['cbs_id', risk_col, 'PoF_Ensemble_12Ay']
-    
+
     # Varsa ekle
     for c in ['Health_Score', 'Ekipman_Tipi', 'Ilce']:
         if c in df_risk.columns: cols_to_merge.append(c)
 
     case_df = recent_faults.merge(
-        df_risk[cols_to_merge], 
-        on='cbs_id', 
+        df_risk[cols_to_merge],
+        on='cbs_id',
         how='left'
     )
     

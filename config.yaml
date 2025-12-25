@@ -18,13 +18,14 @@ data_paths:
   healthy_data: data/girdiler/saglam_final.xlsx
 
 intermediate_paths:
-  fault_events_clean: data/ara_ciktilar/fault_events_clean.csv
-  healthy_equipment_clean: data/ara_ciktilar/healthy_equipment_clean.csv
-  equipment_master: data/ara_ciktilar/equipment_master.csv
-  survival_base: data/ara_ciktilar/survival_base.csv
-  features_structural: data/ara_ciktilar/ozellikler_yapisal.csv
-  features_temporal: data/ara_ciktilar/ozellikler_zamansal.csv
-  ozellikler_pof3: data/ara_ciktilar/ozellikler_pof3.csv
+  fault_events_clean: fault_events_clean.csv
+  healthy_equipment_clean: healthy_equipment_clean.csv
+  equipment_master: equipment_master.csv
+  survival_base: survival_base.csv
+  features_structural: ozellikler_yapisal.csv
+  features_temporal: ozellikler_zamansal.csv
+  ozellikler_pof3: ozellikler_pof3.csv
+  model_input_data_full: model_input_data_full.csv
 
 output_paths:
   ariza_kayitlari: data/sonuclar/ariza_kayitlari.csv

@@ -1887,9 +1887,9 @@ def main():
     if all_bakim_analyses:
         pd.concat(all_bakim_analyses).to_csv(os.path.join(OUTPUT_DIR, "bakim_analysis.csv"), index=False, encoding="utf-8-sig")
     
-    # Save intermediate files for Reporting Script
-    equipment_master.to_csv(os.path.join(OUTPUT_DIR, "equipment_master.csv"), index=False, encoding="utf-8-sig")
-    df_all.to_csv(os.path.join(OUTPUT_DIR, "model_input_data_full.csv"), index=False, encoding="utf-8-sig")
+    # Save intermediate files for Reporting Script (to INTERMEDIATE_DIR not OUTPUT_DIR)
+    equipment_master.to_csv(INTERMEDIATE_PATHS["equipment_master"], index=False, encoding="utf-8-sig")
+    df_all.to_csv(os.path.join(INTERMEDIATE_DIR, "model_input_data_full.csv"), index=False, encoding="utf-8-sig")
     
     # Final Stats
     critical = (report["Health_Score"] < 40).sum()
