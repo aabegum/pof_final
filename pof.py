@@ -137,25 +137,9 @@ REAL_FAILURE_CODES = [
     "NH Altlık Arızası",            # 42 records - NH base failure
     
     # Other Equipment Failures
-"""     "AG Travers Arızası",           # 4 records - Crossarm failure
+    "AG Travers Arızası",           # 4 records - Crossarm failure
     "AG Sehim Bozukluğu",           # 16 records - Sag defect
-    "AG Pano Kol Sigorta Atığı",    # 5,414 records - Fuse opened (NORMAL!)
-    "OG Sigorta Atması",            # 2,470 records - Fuse tripped (NORMAL!)
-    "OG Sigorta Atığı",             # 1,996 records - Fuse tripped (NORMAL!)
-    "AG Pano Faz Sigorta Atığı",    # 50 records - Phase fuse tripped
-    "AG Box SDK Giriş Sigorta Atığı",  # 11 records
-    "AG Box SDK Abone Çıkış Sigorta Atığı",  # 8 records
-    "AG Box / Sdk Giriş Sigorta Atığı",  # 7 records
-    "AG Sigorta Atığı",             # 7 records
     
-    # Breaker operations
-    "AG Termik Açması",             # 42 records - Thermal trip (NORMAL!)
-    "TMS Açması",                   # 37 records - Circuit breaker trip
-    "OG Fider Açması",              # 7 records - Feeder breaker trip """
-]
-
-# Protective operations (fuses/breakers doing their job)
-PROTECTIVE_OPERATIONS = [
     # Fuse operations (87% of all records!)
     "AG Pano Kol Sigorta Atığı",    # 5,414 records - Fuse opened (NORMAL!)
     "OG Sigorta Atması",            # 2,470 records - Fuse tripped (NORMAL!)
@@ -170,6 +154,23 @@ PROTECTIVE_OPERATIONS = [
     "AG Termik Açması",             # 42 records - Thermal trip (NORMAL!)
     "TMS Açması",                   # 37 records - Circuit breaker trip
     "OG Fider Açması",              # 7 records - Feeder breaker trip
+]
+
+# Protective operations (fuses/breakers doing their job)
+PROTECTIVE_OPERATIONS = [
+"""     # Fuse operations (87% of all records!)
+    "AG Pano Kol Sigorta Atığı",    # 5,414 records - Fuse opened (NORMAL!)
+    "OG Sigorta Atması",            # 2,470 records - Fuse tripped (NORMAL!)
+    "OG Sigorta Atığı",             # 1,996 records - Fuse tripped (NORMAL!)
+    "AG Pano Faz Sigorta Atığı",    # 50 records - Phase fuse tripped
+    "AG Box SDK Giriş Sigorta Atığı",  # 11 records
+    "AG Box SDK Abone Çıkış Sigorta Atığı",  # 8 records
+    "AG Box / Sdk Giriş Sigorta Atığı",  # 7 records
+    "AG Sigorta Atığı",             # 7 records
+    # Breaker operations
+    "AG Termik Açması",             # 42 records - Thermal trip (NORMAL!)
+    "TMS Açması",                   # 37 records - Circuit breaker trip
+    "OG Fider Açması",              # 7 records - Feeder breaker trip """
 ]
 
 # Maintenance/planned events
@@ -1569,52 +1570,79 @@ def predict_ml_pof(df: pd.DataFrame, ml_pack: dict, horizons: list) -> pd.DataFr
 
 def compute_health_score(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute Health Score from ACTUAL Probability of Failure
-    Uses absolute thresholds, NOT relative percentiles
+    GÜNCELLENMİŞ VERSİYON: Yüzdelik Dilim (Percentile) Tabanlı Skorlama
+    
+    Eski Yöntem: Mutlak PoF (Olasılık) kullanıyordu. PoF değerleri çok düşük (%1-5) olduğu için
+                 herkes "Çok Sağlıklı" (95-99 Puan) çıkıyordu.
+                 
+    Yeni Yöntem: Varlıkları kendi ekipman grubu içinde 'Risk Sırasına' dizersiniz.
+                 En kötü %5 -> KRİTİK (Puan < 40)
+                 Bu yöntem, filonun en riskli varlıklarını mutlaka ortaya çıkarır.
     """
     
-    # 1. Collect all 12-month PoF predictions
-    pof_cols = [c for c in df.columns if "_pof_" in c and "12ay" in c]
-    
-    if not pof_cols:
-        # No predictions available
-        df["Health_Score"] = 50.0
-        df["Risk_Sinifi"] = "BİLİNMİYOR"
+    # 1. En iyi risk metriğini seç
+    # Öncelik: Ensemble > RSF > Cox/ML
+    risk_col = None
+    if "PoF_Ensemble_12Ay" in df.columns:
+        risk_col = "PoF_Ensemble_12Ay"
+    elif "rsf_pof_12ay" in df.columns:
+        risk_col = "rsf_pof_12ay"
+    else:
+        # Fallback: Bulabildiği herhangi bir 12 aylık tahmin
+        candidates = [c for c in df.columns if "12" in c and "pof" in c.lower()]
+        risk_col = candidates[0] if candidates else None
+
+    if not risk_col:
+        # Hiçbir tahmin yoksa varsayılan
+        df["Health_Score"] = 90
+        df["Risk_Sinifi"] = "BILINMIYOR"
         return df
+
+    # NaNs -> 0 (En düşük risk kabul et)
+    df[risk_col] = df[risk_col].fillna(0)
+
+    # 2. SIRALAMA (RANKING) - Ekipman Tipine Göre
+    # Transformatörleri kendi içinde, Direkleri kendi içinde en riskliden en aza sırala.
+    # rank(pct=True) -> 0.0 (En iyi) ile 1.0 (En kötü) arasında değer verir.
     
-    # 2. Ensemble: Average available predictions
-    df["Mean_PoF_12ay"] = df[pof_cols].mean(axis=1, skipna=True)
+    if "Ekipman_Tipi" in df.columns:
+        # Her ekipman tipini kendi içinde değerlendir
+        df["Risk_Percentile"] = df.groupby("Ekipman_Tipi")[risk_col].rank(pct=True)
+    else:
+        # Ekipman tipi yoksa global sıralama
+        df["Risk_Percentile"] = df[risk_col].rank(pct=True)
+        
+    # Tek elemanlı gruplar için fillna (Hata önleyici)
+    df["Risk_Percentile"] = df["Risk_Percentile"].fillna(0.5)
+
+    # 3. SAĞLIK SKORU HESABI (Sıralamaya Göre)
+    # En kötü (%100 riskli / Percentile 1.0) -> 0 Puan
+    # En iyi (%0 riskli / Percentile 0.0) -> 100 Puan
+    df["Health_Score"] = 100 * (1 - df["Risk_Percentile"])
     
-    # 3. Convert PoF to Health (Inverse relationship)
-    # PoF=0% → Health=100 (Perfect)
-    # PoF=50% → Health=50 (Moderate)
-    # PoF=100% → Health=0 (Critical)
-    df["Health_Score"] = 100 * (1 - df["Mean_PoF_12ay"].clip(0, 1))
-    
-    # 4. Assign Risk Classes (Absolute Thresholds)
-    def assign_risk_class(health):
-        """
-        Industry-standard thresholds for asset health:
-        - 80-100: Low Risk (Good condition)
-        - 60-80: Medium Risk (Monitor)
-        - 40-60: High Risk (Schedule maintenance)
-        - 0-40: Critical (Immediate action)
-        """
-        if health >= 80: return "DÜŞÜK"
-        if health >= 60: return "ORTA"
-        if health >= 40: return "YÜKSEK"
-        return "KRİTİK"
-    
-    df["Risk_Sinifi"] = df["Health_Score"].apply(assign_risk_class)
-    
-    # 5. Chronic Penalty (Optional)
-    # Equipment with repeated failures should be flagged
+    # 4. KRONİK CEZALANDIRMASI
+    # Eğer varlık "Kronik" ise (sık arızalanıyorsa), sıralaması iyi olsa bile puanını düşür.
     if "Chronic_Flag" in df.columns:
-        chronic_mask = df["Chronic_Flag"] == 1
-        # Cap chronic equipment at "Medium Risk" minimum
-        df.loc[chronic_mask, "Health_Score"] = df.loc[chronic_mask, "Health_Score"].clip(upper=60)
-        # Upgrade risk class if needed
-        df.loc[chronic_mask & (df["Risk_Sinifi"] == "DÜŞÜK"), "Risk_Sinifi"] = "ORTA"
+        # Kronikse maksimum 60 puan alabilsin (Otomatikman Yüksek Risk bölgesine itiyoruz)
+        mask_chronic = df["Chronic_Flag"] == 1
+        df.loc[mask_chronic, "Health_Score"] = df.loc[mask_chronic, "Health_Score"].clip(upper=60)
+
+    # 5. RİSK SINIFI ATAMA (Percentile Bazlı)
+    def assign_risk_class(row):
+        score = row["Health_Score"]
+        chronic = row.get("Chronic_Flag", 0)
+        
+        # Kronikler her zaman öncelikli
+        if chronic == 1:
+            return "KRİTİK (KRONİK)"
+            
+        # Yüzdelik dilimlere göre sınıflar:
+        if score < 40: return "KRİTİK"      # En kötü %5 (Percentile > 0.95) - Filonun en çürükleri
+        if score < 70: return "YÜKSEK"      # Sonraki %15 (Percentile 0.80 - 0.95)
+        if score < 85: return "ORTA"        # Sonraki %30
+        return "DÜŞÜK"                      # En iyi %50 (Percentile < 0.50)
+
+    df["Risk_Sinifi"] = df.apply(assign_risk_class, axis=1)
     
     return df
 # =============================================================================
