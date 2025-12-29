@@ -972,35 +972,56 @@ def main():
         logger.warning("[WARN] Risk kolonu yok. Varsayılan 'Low' atanıyor.")
         df['Risk_Class'] = 'Low'
 
-    # PoF Kolonunu Garantiye Al (Eksikse hesapla)
+    # PoF Kolonunu Garantiye Al (Mevcut kodunuzdaki satır)
     df = ensure_pof_column(df, logger)
-    
-    # 3. Master Veri ile Zenginleştirme (Lokasyon vb.)
-    # Analiz sırasında bazı sütunlar kaybolmuş olabilir, ana kaynaktan tamamlıyoruz.
-    master_path = os.path.join(INTERMEDIATE_DIR, "equipment_master.csv")
-    
-    if os.path.exists(master_path):
-        meta = pd.read_csv(master_path)
-        meta['cbs_id'] = meta['cbs_id'].astype(str).str.lower().str.strip()
-        
-        # Hangi sütunları geri istiyoruz?
-        desired = ['Latitude', 'Longitude', 'Musteri_Sayisi', 'Ilce', 'Sehir', 'Mahalle', 'Ekipman_Tipi', 'Marka']
-        add = [c for c in desired if c in meta.columns and c not in df.columns]
-        
-        if add:
-            logger.info(f"[MERGE] Eksik bağlam kolonları ekleniyor: {add}")
-            df = df.merge(meta[['cbs_id'] + add], on='cbs_id', how='left')
-    else:
-        logger.warning("[WARN] equipment_master.csv bulunamadı. Lokasyon verileri eksik olabilir.")
-    
-    # Eksik metin verilerini doldur (Görselleştirme hatasını önler)
-    for col in ['Ilce', 'Sehir', 'Ekipman_Tipi', 'Marka']:
-        if col not in df.columns: df[col] = 'Bilinmiyor'
-        else: df[col] = df[col].fillna('Bilinmiyor')
 
-    # 4. Validasyon ve Üretim
-    validate_base_rates(df, logger)
+    # =============================================================================
+    # 🚑 [FIX] KRONİK VERİ KURTARMA OPERASYONU
+    # =============================================================================
+    # Final dosyada 'Chronic_Flag' yoksa, ara hesaplama dosyasından (ozellikler_zamansal) çeker.
+    if 'Chronic_Flag' not in df.columns and 'Kronik_Flag' not in df.columns:
+        logger.warning("  ⚠️ Ana dosyada 'Chronic_Flag' bulunamadı! Ara dosyalardan kurtarılıyor...")
+        
+        # Log dosyasında gördüğümüz ara çıktı yolu
+        chronic_path = os.path.join(INTERMEDIATE_DIR, "ozellikler_zamansal.csv")
+        
+        if os.path.exists(chronic_path):
+            try:
+                # Sadece ID ve Flag kolonlarını oku (Hafif olsun)
+                df_chronic = pd.read_csv(chronic_path, usecols=lambda c: c in ['cbs_id', 'Chronic_Flag', 'Kronik_Flag', 'Fault_Count'])
+                
+                # ID Standardizasyonu (Eşleşme garantisi için)
+                df_chronic['cbs_id'] = df_chronic['cbs_id'].astype(str).str.lower().str.strip()
+                
+                # Kolon ismini belirle
+                source_col = 'Chronic_Flag' if 'Chronic_Flag' in df_chronic.columns else 'Kronik_Flag'
+                
+                if source_col:
+                    # Ana tablo ile birleştir
+                    df = df.merge(df_chronic[['cbs_id', source_col]], on='cbs_id', how='left')
+                    
+                    # NaN değerleri 0 yap (Eşleşmeyenler kronik değildir)
+                    df[source_col] = df[source_col].fillna(0).astype(int)
+                    
+                    # İsim standardı
+                    if source_col != 'Chronic_Flag':
+                        df['Chronic_Flag'] = df[source_col]
+                        
+                    count = df['Chronic_Flag'].sum()
+                    logger.info(f"  ✅ Kronik verisi başarıyla eklendi: {count} adet kronik varlık kurtarıldı.")
+                else:
+                    logger.error("  ❌ Ara dosyada da flag bulunamadı.")
+            except Exception as e:
+                logger.error(f"  ❌ Merge işlemi başarısız: {e}")
+        else:
+            logger.error(f"  ❌ Ara dosya bulunamadı: {chronic_path}")
+            df['Chronic_Flag'] = 0 # Kod patlamasın diye dummy
     
+    # Hâlâ yoksa (Kurtarma başarısızsa) dummy oluştur
+    if 'Chronic_Flag' not in df.columns:
+        df['Chronic_Flag'] = 0
+
+    # =============================================================================
     # A) Aksiyon Listeleri
     crit_chronic = generate_action_lists(df, logger)
     
