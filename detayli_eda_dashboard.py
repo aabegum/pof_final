@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-PoF3 - Detaylı EDA ve Operasyonel Analiz Modülü
+PoF - Detaylı EDA ve Operasyonel Analiz Modülü
 ================================================
 GÜNCELLENMİŞ VERSİYON:
 1. Data Cleaning (Filtreleme) kaldırıldı (Ana pipeline'da yapıldığı için).
@@ -29,7 +29,24 @@ plt.rcParams['font.family'] = 'DejaVu Sans'
 
 def ensure_dirs():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
+# =============================================================================
+# 📥 DATA INGESTION & CONFIGURATION (KURULUM VE VERİ YÜKLEME)
+# =============================================================================
+# Bu modül, ana analiz motorundan (pof.py) bağımsız çalışır ve ham veriyi
+# olduğu gibi (filtrelemeden) inceleyerek veri kalitesi hakkında rapor verir.
+#
+# 🛠️ Kritik Ayarlar:
+# 1. Ham Veri Analizi:
+#    - 'ariza_final.xlsx' dosyası okunur.
+#    - Filtreleme (Sigorta atığı vb. silme) yapılmaz. Amaç "Gerçeği Görmek"tir.
+#
+# 2. Tarih Formatı (dayfirst=True):
+#    - Excel'den gelen "Gün.Ay.Yıl" (01.02.2023) formatının, Amerikan formatı
+#      olan "Ay/Gün/Yıl" (1 Şubat yerine 2 Ocak) olarak yanlış algılanmasını engeller.
+#
+# 3. Klasör Güvenliği (ensure_dirs):
+#    - Görsellerin kaydedileceği klasör yoksa, hata vermez, otomatik oluşturur.
+# =============================================================================
 def load_data():
     print(f"[LOAD] Veri yükleniyor: {INPUT_FILE}")
     if not os.path.exists(INPUT_FILE):
@@ -54,7 +71,23 @@ def load_data():
     df['Gun_Ismi'] = df['started at'].dt.day_name()
     
     return df
-
+# =============================================================================
+# 📊 OPERATIONAL ANALYTICS (OPERASYONEL ANALİZLER)
+# =============================================================================
+# Bu bölüm, arıza verisinin "Zaman" ve "Yoğunluk" boyutlarını inceler.
+#
+# 1. Isı Haritası (Heatmap):
+#    - Vardiya optimizasyonu için arızaların gün/saat dağılımını gösterir.
+#    - Örn: "Pazartesi 09:00-11:00 arası kırmızı bölgedir."
+#
+# 2. Mevsimsellik (Seasonality):
+#    - Şebekenin dönemsel yük karakteristiğini (Yaz/Kış) ve genel trendi gösterir.
+#    - Yatırım planlaması için "Hangi aylarda teyakkuza geçmeliyiz?" sorusunu cevaplar.
+#
+# 3. Pareto Analizi (80/20 Kuralı):
+#    - Çift eksenli grafik (Bar + Line).
+#    - Arızaların %80'ine sebep olan "Azınlık ama Kritik" ekipmanları belirler.
+# =============================================================================
 # --- ANALİZ 1: ISI HARİTASI ---
 def plot_heatmap(df):
     print("[1/5] Isı Haritası çiziliyor...")
@@ -126,7 +159,21 @@ def plot_pareto(df):
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, "03_pareto_analizi.png"), dpi=300)
     plt.close()
-
+# =============================================================================
+# 📉 DIAGNOSTIC & PERFORMANCE (TANI VE PERFORMANS ANALİZİ)
+# =============================================================================
+# Bu bölüm, arızaların "Niteliğini" ve Ekiplerin "Performansını" ölçer.
+#
+# 4. Arıza Tipi Ayrımı (Pie Chart):
+#    - "Gerçek Arıza" (Donanım değişimi) ile "İşletme Sorunu" (Sigorta atığı)
+#      arasındaki oranı gösterir.
+#    - Bakım stratejisinin "Yatırım" mı yoksa "Yük Dengeleme" mi olması gerektiğini söyler.
+#
+# 5. Müdahale Süreleri (Histogram):
+#    - Arızaların giderilme süresinin dağılımını gösterir (MTTR).
+#    - 24 saati aşan (unutulmuş kayıtlar) verileri temizleyerek
+#      ekiplerin gerçek saha performansını (Medyan Süre) ortaya çıkarır.
+# =============================================================================
 # --- ANALİZ 4: ARIZA TİPİ (DÜZELTİLDİ) ---
 def plot_cause_breakdown(df):
     print("[4/5] Neden analizi yapılıyor...")
@@ -183,7 +230,42 @@ def plot_durations(df):
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, "05_mudahale_suresi.png"), dpi=300)
     plt.close()
-
+    
+# --- ANALİZ 6: VERİ KALİTESİ (MISSING MATRIX) ---
+def plot_missing_matrix(df):
+    print("[6/6] Veri kalitesi (Eksik Veri) analizi yapılıyor...")
+    if df.empty: return
+    
+    # Sadece önemli kolonları seçelim
+    cols = ['cbs_id', 'started at', 'ended at', 'cause code', 
+            'Ekipman_Tipi', 'Ilce', 'Mahalle', 'Enlem', 'Boylam']
+    
+    # Veride olanları al
+    cols = [c for c in cols if c in df.columns]
+    
+    plt.figure(figsize=(12, 6))
+    
+    # Eksik veriyi (True/False) görselleştir
+    # Sarı çizgiler verinin olduğu, Mor alanlar eksik olduğu yerleri gösterir
+    sns.heatmap(df[cols].isnull(), cbar=False, yticklabels=False, cmap='viridis')
+    
+    plt.title('Veri Eksiklik Matrisi (Sarı=Eksik / Mor=Tam)', fontsize=14)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    path = os.path.join(OUTPUT_DIR, "06_veri_kalitesi_matrisi.png")
+    plt.savefig(path, dpi=300)
+    plt.close()
+# =============================================================================
+# 🚀 MAIN ORCHESTRATION (ANA YÖNETİM)
+# =============================================================================
+# Bu fonksiyon, tüm analiz sürecini yönetir.
+#
+# 1. Güvenlik: Veri yüklenemezse işlemi durdurur.
+# 2. Akış: 5 farklı görselleştirme fonksiyonunu sırayla çağırır.
+# 3. Hata Yakalama: Olası kod hatalarını (Exception) yakalar ve
+#    kullanıcıya anlaşılır bir hata raporu (Traceback) sunar.
+# =============================================================================
 # --- MAIN ---
 def main():
     ensure_dirs()
