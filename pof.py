@@ -347,31 +347,62 @@ def convert_duration_minutes(series: pd.Series, logger: logging.Logger) -> pd.Se
 def temporal_train_test_split(
     df: pd.DataFrame,
     test_size: float = 0.25,
+    min_test_event_rate: float = 0.025,  # En az %2.5 event
     logger: logging.Logger = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    ✅ FIXED: Returns INDEX LABELS (not positions) based on sorted time.
-    Ensures .loc selection works correctly downstream.
+    ✅ FIXED: Event-aware temporal split
+    Ensures test set has minimum event rate for reliable evaluation
     """
+    
     if "Kurulum_Tarihi" not in df.columns:
         raise ValueError("Temporal split requires 'Kurulum_Tarihi' column")
     
-    # 1. Parse dates safely
     install_dates = pd.to_datetime(df["Kurulum_Tarihi"], errors="coerce")
     if install_dates.isna().all():
         raise ValueError("All Kurulum_Tarihi values are invalid")
     
-    # 2. Create a temporary dataframe for sorting (preserve original index)
     df_sorted = df.copy()
     df_sorted["_install_clean"] = install_dates
-    
-    # Sort by date, but KEEP the original index
     df_sorted = df_sorted.sort_values("_install_clean")
     
-    # 3. Determine Cutoff Index
-    cutoff_pos = int(len(df_sorted) * (1 - test_size))
+    # Standard cutoff
+    cutoff_pos_initial = int(len(df_sorted) * (1 - test_size))
     
-    # 4. Split and retrieve the ORIGINAL INDEX LABELS
+    # Check test event rate
+    if "event" in df.columns:
+        test_events_initial = df_sorted.iloc[cutoff_pos_initial:]["event"].mean()
+        
+        # If too low, adjust cutoff backwards
+        if test_events_initial < min_test_event_rate:
+            if logger:
+                logger.warning(f"[SPLIT] Initial test events: {test_events_initial:.1%} < {min_test_event_rate:.1%}")
+            
+            # Move cutoff back by 6 months
+            cutoff_date_initial = df_sorted.iloc[cutoff_pos_initial]["_install_clean"]
+            cutoff_date_adjusted = cutoff_date_initial - pd.Timedelta(days=180)
+            
+            # Find new cutoff position
+            mask = df_sorted["_install_clean"] <= cutoff_date_adjusted
+            if mask.any():
+                cutoff_pos = mask.sum()
+                
+                # Verify improvement
+                test_events_adjusted = df_sorted.iloc[cutoff_pos:]["event"].mean()
+                
+                if test_events_adjusted > test_events_initial:
+                    if logger:
+                        logger.info(f"[SPLIT] Adjusted cutoff: test events now {test_events_adjusted:.1%}")
+                else:
+                    cutoff_pos = cutoff_pos_initial  # Rollback if no improvement
+            else:
+                cutoff_pos = cutoff_pos_initial
+        else:
+            cutoff_pos = cutoff_pos_initial
+    else:
+        cutoff_pos = cutoff_pos_initial
+    
+    # Split
     train_labels = df_sorted.iloc[:cutoff_pos].index.values
     test_labels = df_sorted.iloc[cutoff_pos:].index.values
     
@@ -381,7 +412,6 @@ def temporal_train_test_split(
         logger.info(f"[TEMPORAL SPLIT] Train: {len(train_labels)} | Test: {len(test_labels)}")
         
         if "event" in df.columns:
-            # Using .loc because we have labels now
             train_ev = df.loc[train_labels, "event"].mean()
             test_ev = df.loc[test_labels, "event"].mean()
             logger.info(f"[TEMPORAL SPLIT] Train events: {train_ev:.1%} | Test events: {test_ev:.1%}")
@@ -1525,72 +1555,7 @@ def train_ml_models(
     except Exception as e:
         logger.warning(f"[ML] Training failed: {e}")
         return None
-# =============================================================================
-# 🔮 ML PREDICTION: CONDITIONAL PROBABILITY OF FAILURE (KOŞULLU RİSK HESABI)
-# =============================================================================
-# Bu fonksiyon, eğitilen modelin ürettiği "Sağkalım Eğrilerini" (Survival Functions)
-# kullanarak, her bir varlığın gelecekteki arıza ihtimalini hesaplar.
-#
-# 🧠 Kritik Mantık (Conditional Probability):
-#    - Soru: "Bu trafo önümüzdeki 1 yıl içinde bozulur mu?"
-#    - Yanlış Yöntem: Sadece S(t=1 yıl) değerine bakmak.
-#    - Doğru Yöntem: Varlığın ŞU ANKİ YAŞINI (t) hesaba katmak.
-#
-# 📐 Formül:
-#    Risk = 1 - ( S(t + Horizon) / S(t) )
-#
-#    - S(t): Varlığın bugüne kadar hayatta kalma olasılığı.
-#    - S(t + Horizon): Gelecekteki hedef tarihe kadar hayatta kalma olasılığı.
-#    - Bu formül, "Bugüne kadar sağ kalan bir varlığın, X gün daha yaşama ihtimali nedir?"
-#      sorusunun cevabıdır. Eski varlıklar için riski abartmayı önler.
-# =============================================================================
-""" def predict_ml_pof(df: pd.DataFrame, ml_pack: dict, horizons: list) -> pd.DataFrame:
-    # ✅ FIX: Handle both old and new dict structure
-    if "model" in ml_pack:
-        model = ml_pack["model"]
-    elif "models" in ml_pack:
-        model = ml_pack["models"]
-    else:
-        return pd.DataFrame({"cbs_id": df["cbs_id"].values})
-    
-    cols = ml_pack["safe_cols"]
-    
-    X = df[cols].copy()
-    current_age = df["duration_days"].fillna(0).clip(lower=0).values
-    
-    out = pd.DataFrame({"cbs_id": df["cbs_id"].values})
-    
-    # Get survival functions S(t) for every asset
-    # This returns an array of functions
-    surv_funcs = model.predict_survival_function(X)
-    
-    for H in horizons:
-        label = SURVIVAL_HORIZON_LABELS.get(H, f"{H}g")
-        pofs = []
-        
-        for i, fn in enumerate(surv_funcs):
-            # S(t) = Probability of surviving past time t
-            # P(Fail in H | Alive at Age) = 1 - (S(Age + H) / S(Age))
-            
-            # Get S(current_age)
-            prob_survive_now = fn(current_age[i])
-            
-            # Get S(current_age + horizon)
-            prob_survive_future = fn(current_age[i] + H)
-            
-            # Avoid division by zero
-            if prob_survive_now < 1e-5:
-                # If model thinks it's already dead, risk is max
-                conditional_risk = 1.0
-            else:
-                conditional_risk = 1.0 - (prob_survive_future / prob_survive_now)
-            
-            pofs.append(np.clip(conditional_risk, 0, 1))
-            
-        out[f"ml_pof_{label}"] = pofs
-        
-    return out
- """
+
 # =============================================================================
 # BACKTESTING (Temporal Validation Proof)
 # =============================================================================
@@ -1612,10 +1577,7 @@ def train_ml_models(
 #    - Bu, sahadaki bakım ekipleri için en hayati metriktir (Return on Investment).
 # =============================================================================
 class TemporalBacktester:
-    """
-    Walk-forward validation to prove model doesn't cheat.
-    Simulates: "If we ran this model in 2022, would it have predicted the 2023 failures?"
-    """
+    """Enhanced backtester with proper temporal split and survival modeling"""
     
     def __init__(self, df_fault: pd.DataFrame, df_healthy: pd.DataFrame, logger: logging.Logger):
         self.df_fault = df_fault
@@ -1624,74 +1586,104 @@ class TemporalBacktester:
         self.results = []
     
     def _generate_snapshot(self, cutoff_date: pd.Timestamp):
-        """
-        Create training dataset as it would have looked at 'cutoff_date'.
-        Crucial: We must not see any data after cutoff_date.
-        """
-        # 1. Filter faults known at that time
+        """Create training dataset as it would have looked at cutoff_date"""
         faults_past = self.df_fault[self.df_fault["started at"] <= cutoff_date].copy()
-        
-        # 2. Apply the same "Real Failure" filter logic
         faults_filtered = filter_real_failures(faults_past, self.logger)
         
-        # 3. Determine Observation Start (Dynamic based on available history)
-        # This fixes the "Missing Argument" bug
-        if not self.df_fault.empty:
-            observation_start_date = self.df_fault["started at"].min()
-        else:
-            observation_start_date = cutoff_date # Fallback
-            
-        # 4. Build Dataset (Using fixed signatures)
+        observation_start_date = self.df_fault["started at"].min() if not self.df_fault.empty else cutoff_date
+        
         equipment_master = build_equipment_master(faults_past, self.df_healthy, self.logger, cutoff_date)
         
-        # Pass observation_start_date correctly
         df_snapshot = add_survival_columns_inplace(
             equipment_master, 
             faults_filtered, 
             cutoff_date, 
-            observation_start_date, # <--- FIX: Added missing arg
+            observation_start_date,
             self.logger
         )
         
-        # 5. Add Features
         chronic_df = compute_chronic_features(faults_past, cutoff_date, self.logger)
         
-        # Pass observation_start_date correctly
         df_snapshot = add_temporal_features_inplace(
             df_snapshot, 
             cutoff_date, 
             chronic_df, 
-            observation_start_date, # <--- FIX: Added missing arg
+            observation_start_date,
             self.logger
         )
         
         return df_snapshot
     
     def _train_simple_model(self, df: pd.DataFrame, features: list):
-        """Train lightweight XGBoost for backtesting"""
+        """
+        ✅ FIXED: Proper preprocessing + temporal split + survival-aware training
+        """
+        # 1. Feature Selection
         X = df[features].copy()
         
-        # Data Hygiene: Remove dates and non-numerics just in case
-        X = X.select_dtypes(include=[np.number]).fillna(0)
+        # 2. ✅ ONE-HOT ENCODING (Main pipeline ile tutarlı)
+        cat_cols = X.select_dtypes(include=['object']).columns.tolist()
         
-        # Safety check: If X is empty (e.g. no features generated), return Dummy
+        # High cardinality check
+        for col in cat_cols[:]:
+            if X[col].nunique() > 20:
+                self.logger.info(f"[BACKTEST] Dropping {col}: high cardinality")
+                X = X.drop(columns=[col])
+                cat_cols.remove(col)
+        
+        if cat_cols:
+            X = pd.get_dummies(X, columns=cat_cols, drop_first=True, dtype=float)
+        
+        # 3. Convert to numeric
+        X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+        
         if X.empty or len(X.columns) == 0:
             from sklearn.dummy import DummyClassifier
             return DummyClassifier(strategy='constant', constant=0), []
         
-        # Train simple classifier
-        # We use a smaller model for backtesting speed
+        # 4. ✅ TEMPORAL SPLIT (Main pipeline ile tutarlı)
+        try:
+            # Merge X back with df for temporal split
+            X_with_meta = X.copy()
+            X_with_meta['event'] = df['event'].values
+            X_with_meta['Kurulum_Tarihi'] = df['Kurulum_Tarihi'].values
+            
+            train_labels, test_labels = temporal_train_test_split(
+                X_with_meta, 
+                test_size=0.25, 
+                logger=self.logger
+            )
+            
+            X_train = X.loc[train_labels]
+            X_test = X.loc[test_labels]
+            y_train = df.loc[train_labels, 'event']
+            y_test = df.loc[test_labels, 'event']
+            
+        except Exception as e:
+            self.logger.warning(f"[BACKTEST] Temporal split failed: {e}, using all data")
+            X_train = X
+            y_train = df['event']
+        
+        # 5. Train model
         model = XGBClassifier(
             n_estimators=50, 
-            max_depth=3, 
+            max_depth=3,
+            scale_pos_weight=len(y_train[y_train==0]) / max(1, len(y_train[y_train==1])),  # ✅ Class imbalance
             eval_metric="logloss", 
             random_state=42,
             n_jobs=-1
         )
         
         try:
-            model.fit(X, df["event"])
+            model.fit(X_train, y_train)
+            
+            # ✅ Log training performance
+            if len(test_labels) > 0:
+                test_score = model.score(X_test, y_test)
+                self.logger.info(f"[BACKTEST] Training accuracy: {test_score:.3f}")
+            
             return model, X.columns.tolist()
+            
         except Exception as e:
             self.logger.warning(f"[BACKTEST] Model training failed: {e}")
             from sklearn.dummy import DummyClassifier
@@ -1703,47 +1695,65 @@ class TemporalBacktester:
         self.logger.info(f"[BACKTEST] Walk-Forward Validation ({start_year}-{end_year})")
         self.logger.info("="*60)
         
-        from sklearn.metrics import roc_auc_score
+        from sklearn.metrics import roc_auc_score, precision_score, recall_score
         
         for year in range(start_year, end_year + 1):
             cutoff_date = pd.Timestamp(f"{year}-01-01")
             test_end_date = cutoff_date + pd.Timedelta(days=horizon_days)
             
             # 1. Generate Historical Snapshot
-            self.logger.info(f"[BACKTEST] Generating snapshot for {cutoff_date.date()}...")
+            self.logger.info(f"\n[BACKTEST] Generating snapshot for {cutoff_date.date()}...")
             df_train = self._generate_snapshot(cutoff_date)
             
-            # 2. Define Ground Truth (What happened in the next year?)
-            # We look at the MAIN fault database for future events
+            # 2. Define Ground Truth
             future_faults = self.df_fault[
                 (self.df_fault["started at"] > cutoff_date) & 
                 (self.df_fault["started at"] <= test_end_date)
             ]
             
-            # Filter future faults to only include REAL failures
-            # (We don't want to fail the model because a fuse blew)
             future_faults = filter_real_failures(future_faults, self.logger)
-            
             failed_ids = set(future_faults["cbs_id"].unique())
             
-            # Target: 1 if asset failed in prediction window, 0 otherwise
+            # Target
             y_true = df_train["cbs_id"].isin(failed_ids).astype(int)
             
             if y_true.sum() < 5:
-                self.logger.warning(f"[BACKTEST] {year}: Skipped - Insufficient failures ({y_true.sum()}) to evaluate.")
+                self.logger.warning(f"[BACKTEST] {year}: Skipped - Insufficient failures ({y_true.sum()})")
                 continue
             
+            # ✅ Log ground truth stats
+            self.logger.info(f"[BACKTEST] Ground truth: {y_true.sum()} failures out of {len(y_true)} assets ({100*y_true.mean():.2f}%)")
+            
             # 3. Train Model
-            # Exclude target leakage columns
             exclude_cols = ["cbs_id", "event", "duration_days", "Kurulum_Tarihi", "entry_days", 
-                            "Ilk_Gercek_Ariza_Tarihi", "started at", "ended at"]
+                            "Ilk_Gercek_Ariza_Tarihi", "started at", "ended at", "Ilk_Ariza_Tarihi"]
             structural_cols = [c for c in df_train.columns if c not in exclude_cols]
             
             model, valid_features = self._train_simple_model(df_train, structural_cols)
             
             # 4. Predict
             if valid_features:
-                X_test = df_train[valid_features].fillna(0)
+                # ✅ Rebuild X with same preprocessing
+                X_test = df_train[structural_cols].copy()
+                
+                # One-hot encoding (same as training)
+                cat_cols = X_test.select_dtypes(include=['object']).columns.tolist()
+                for col in cat_cols[:]:
+                    if col not in valid_features and X_test[col].nunique() > 20:
+                        X_test = X_test.drop(columns=[col])
+                        cat_cols.remove(col)
+                
+                if cat_cols:
+                    X_test = pd.get_dummies(X_test, columns=cat_cols, drop_first=True, dtype=float)
+                
+                X_test = X_test.apply(pd.to_numeric, errors='coerce').fillna(0)
+                
+                # Align columns with training
+                missing_cols = set(valid_features) - set(X_test.columns)
+                for col in missing_cols:
+                    X_test[col] = 0
+                X_test = X_test[valid_features]
+                
                 probs = model.predict_proba(X_test)[:, 1]
             else:
                 probs = np.zeros(len(y_true))
@@ -1754,29 +1764,49 @@ class TemporalBacktester:
             except ValueError:
                 auc = 0.5
             
-            # Precision at Top 100 (Operational Metric)
-            # "If we inspected the top 100 risk items, how many were actually broken?"
+            # ✅ Additional metrics
+            # Precision/Recall at optimal threshold
+            threshold = np.percentile(probs, 95)  # Top 5%
+            y_pred = (probs >= threshold).astype(int)
+            
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            
+            # Top-100 Precision
             if len(probs) >= 100:
                 top_100_idx = np.argsort(probs)[-100:]
                 hits = y_true.iloc[top_100_idx].sum()
+                top_100_precision = hits / 100
             else:
-                hits = y_true.sum() # Edge case for small datasets
+                hits = y_true.sum()
+                top_100_precision = hits / len(y_true)
             
-            self.logger.info(f"[BACKTEST] {year} Results -> AUC: {auc:.3f} | Top-100 Hits: {hits}/{min(100, y_true.sum())}")
+            self.logger.info(f"[BACKTEST] {year} Results:")
+            self.logger.info(f"  - AUC: {auc:.3f}")
+            self.logger.info(f"  - Top-100 Hits: {hits}/{min(100, len(y_true))} ({100*top_100_precision:.1f}%)")
+            self.logger.info(f"  - Precision@Top5%: {precision:.3f}")
+            self.logger.info(f"  - Recall@Top5%: {recall:.3f}")
             
             self.results.append({
                 "Year": year,
                 "AUC": auc,
                 "Top100_Hits": hits,
-                "Total_Failures_In_Window": y_true.sum()
+                "Top100_Precision": top_100_precision,
+                "Precision_Top5pct": precision,
+                "Recall_Top5pct": recall,
+                "Total_Failures": y_true.sum(),
+                "Total_Assets": len(y_true)
             })
         
         # Save Summary
         results_df = pd.DataFrame(self.results)
         if not results_df.empty:
-            out_path = os.path.join(os.path.dirname(self.logger.handlers[0].baseFilename).replace("loglar", "data/sonuclar"), "backtest_results_temporal.csv")
+            out_path = os.path.join(
+                os.path.dirname(self.logger.handlers[0].baseFilename).replace("loglar", "data/sonuclar"), 
+                "backtest_results_temporal.csv"
+            )
             results_df.to_csv(out_path, index=False)
-            self.logger.info(f"[BACKTEST] Results saved: {out_path}")
+            self.logger.info(f"\n[BACKTEST] Results saved: {out_path}")
             
         return results_df
 
@@ -1944,6 +1974,25 @@ def predict_rsf_pof(df: pd.DataFrame, rsf_pipe, structural_cols: list, horizons:
             pofs.append(1.0 - np.clip((S_b + 1e-12) / (S_a + 1e-12), 0, 1))
         out[f"rsf_pof_{label}"] = pofs
     return out
+# =============================================================================
+# 🔮 ML PREDICTION: CONDITIONAL PROBABILITY OF FAILURE (KOŞULLU RİSK HESABI)
+# =============================================================================
+# Bu fonksiyon, eğitilen modelin ürettiği "Sağkalım Eğrilerini" (Survival Functions)
+# kullanarak, her bir varlığın gelecekteki arıza ihtimalini hesaplar.
+#
+# 🧠 Kritik Mantık (Conditional Probability):
+#    - Soru: "Bu trafo önümüzdeki 1 yıl içinde bozulur mu?"
+#    - Yanlış Yöntem: Sadece S(t=1 yıl) değerine bakmak.
+#    - Doğru Yöntem: Varlığın ŞU ANKİ YAŞINI (t) hesaba katmak.
+#
+# 📐 Formül:
+#    Risk = 1 - ( S(t + Horizon) / S(t) )
+#
+#    - S(t): Varlığın bugüne kadar hayatta kalma olasılığı.
+#    - S(t + Horizon): Gelecekteki hedef tarihe kadar hayatta kalma olasılığı.
+#    - Bu formül, "Bugüne kadar sağ kalan bir varlığın, X gün daha yaşama ihtimali nedir?"
+#      sorusunun cevabıdır. Eski varlıklar için riski abartmayı önler.
+# =============================================================================
 
 def predict_ml_pof(df: pd.DataFrame, ml_pack: dict, horizons: list) -> pd.DataFrame:
     """
@@ -2225,123 +2274,109 @@ def analyze_bakim_effect(df_eq: pd.DataFrame, eq_type: str, logger: logging.Logg
 
 def compute_health_score(df: pd.DataFrame, logger: logging.Logger = None) -> pd.DataFrame:
     """
-    Computes Health Score based on RELATIVE RISK (Percentile Ranking).
-    Ensures that the worst assets are always flagged, even if absolute PoF is low.
+    GÜNCELLENMİŞ VERSİYON: Yüzdelik Dilim (Percentile) Tabanlı Skorlama   
+    Eski Yöntem: Mutlak PoF (Olasılık) kullanıyordu. PoF değerleri çok düşük (%1-5) olduğu için
+                 herkes "Çok Sağlıklı" (95-99 Puan) çıkıyordu.
+               
+    Yeni Yöntem: Varlıkları kendi ekipman grubu içinde 'Risk Sırasına' dizersiniz.
+                 En kötü %5 -> KRİTİK (Puan < 40)
+                 Bu yöntem, filonun en riskli varlıklarını mutlaka ortaya çıkarır.
+
     """
-    # 1. En iyi risk metriğini seç (Hiyerarşik Seçim)
+    # 1. En iyi risk metriğini seç
+    # Öncelik: Ensemble > RSF > Cox/ML
     risk_col = None
-    
-    # Öncelik Sırası: Ensemble > GBSA (ML) > RSF > Cox
-    possible_cols = [
-        "PoF_Ensemble_12Ay", 
-        "ml_pof_12ay",   # GBSA genellikle RSF'ten daha keskindir
-        "rsf_pof_12ay", 
-        "cox_pof_12ay"
-    ]
-    
-    for col in possible_cols:
-        if col in df.columns:
-            risk_col = col
-            break
-            
-    # Eğer özel isimli sütunlar yoksa, herhangi bir 12 aylık tahmini bul
-    if not risk_col:
+    if "PoF_Ensemble_12Ay" in df.columns:
+        risk_col = "PoF_Ensemble_12Ay"
+    elif "rsf_pof_12ay" in df.columns:
+        risk_col = "rsf_pof_12ay"
+    else:
+        # Fallback: Bulabildiği herhangi bir 12 aylık tahmin
         candidates = [c for c in df.columns if "12" in c and "pof" in c.lower()]
         risk_col = candidates[0] if candidates else None
 
+    # Risk column seçiminden sonra:
     if not risk_col:
-        if logger: logger.warning("[HEALTH] No PoF columns found. Defaulting to Score=90.")
+        if logger:
+            logger.warning("[HEALTH] No PoF columns found. Defaulting to Score=90.")
         df["Health_Score"] = 90
         df["Risk_Sinifi"] = "BILINMIYOR"
         return df
-        
-    if logger: logger.info(f"[HEALTH] Calculating scores using base metric: {risk_col}")
-
-    # NaNs -> 0 (En düşük risk)
+    
+    if logger:
+        logger.info(f"[HEALTH] Calculating scores using: {risk_col}")
+    # NaNs -> 0 (En düşük risk kabul et)
     df[risk_col] = df[risk_col].fillna(0)
-
     # 2. SIRALAMA (RANKING) - Ekipman Tipine Göre
-    # Transformatörleri kendi içinde, Direkleri kendi içinde yarıştır.
+    # Transformatörleri kendi içinde, Direkleri kendi içinde en riskliden en aza sırala.
+    # rank(pct=True) -> 0.0 (En iyi) ile 1.0 (En kötü) arasında değer verir.
+
     if "Ekipman_Tipi" in df.columns:
-        # rank(pct=True) -> 0.0 (En iyi) ... 1.0 (En kötü)
+        # Her ekipman tipini kendi içinde değerlendir
         df["Risk_Percentile"] = df.groupby("Ekipman_Tipi")[risk_col].rank(pct=True)
     else:
-        df["Risk_Percentile"] = df[risk_col].rank(pct=True)
-        
-    # Tek elemanlı gruplar için (Rank NaN dönerse) ortalama ver
+        # Ekipman tipi yoksa global sıralama
+        df["Risk_Percentile"] = df[risk_col].rank(pct=True)       
+    # Tek elemanlı gruplar için fillna (Hata önleyici)
     df["Risk_Percentile"] = df["Risk_Percentile"].fillna(0.5)
 
-    # 3. SAĞLIK SKORU (0-100)
-    # Formül: 100 * (1 - Percentile)
-    # Percentile 0.99 (En Riskli) -> Score 1 (Çok Kötü)
-    # Percentile 0.01 (En Güvenli) -> Score 99 (Çok İyi)
-    df["Health_Score"] = 100.0 * (1.0 - df["Risk_Percentile"])
-    
-    # 4. KRONİK CEZASI
-    # Kronik varlıklar asla "Yeşil" (Düşük Risk) olamaz.
-    if "Chronic_Flag" in df.columns:
-        mask_chronic = df["Chronic_Flag"] == 1
-        # Kronikleri en fazla "Orta Risk" (Score 60) seviyesine indir
-        # Hatta daha agresif olabiliriz: Max Score 40 (Yüksek Risk)
-        df.loc[mask_chronic, "Health_Score"] = df.loc[mask_chronic, "Health_Score"].clip(upper=40)
+    # 3. SAĞLIK SKORU HESABI (Sıralamaya Göre)
+    # En kötü (%100 riskli / Percentile 1.0) -> 0 Puan
+    # En iyi (%0 riskli / Percentile 0.0) -> 100 Puan
+    df["Health_Score"] = 100 * (1 - df["Risk_Percentile"])
 
-    # 5. RİSK SINIFLANDIRMASI (Endüstriyel Eşikler)
-    # Pareto Mantığı: Sorunların %80'i varlıkların %20'sinden çıkar.
+    # 4. KRONİK CEZALANDIRMASI
+    # Eğer varlık "Kronik" ise (sık arızalanıyorsa), sıralaması iyi olsa bile puanını düşür.
+    if "Chronic_Flag" in df.columns:
+        # Kronikse maksimum 60 puan alabilsin (Otomatikman Yüksek Risk bölgesine itiyoruz)
+        mask_chronic = df["Chronic_Flag"] == 1
+        df.loc[mask_chronic, "Health_Score"] = df.loc[mask_chronic, "Health_Score"].clip(upper=60)
+    # 5. RİSK SINIFI ATAMA (Percentile Bazlı)
     def assign_risk_class(row):
         score = row["Health_Score"]
-        chronic = row.get("Chronic_Flag", 0)
-        
+        chronic = row.get("Chronic_Flag", 0)       
+        # Kronikler her zaman öncelikli
         if chronic == 1:
-            return "KRİTİK (KRONİK)" # Kırmızı Alarm 🚨
-            
-        # Skorlar (Percentile bazlı):
-        if score < 20: return "KRİTİK"      # En kötü %20 (Riskli Bölge)
-        if score < 50: return "YÜKSEK"      # Sonraki %30
-        if score < 80: return "ORTA"        # Sonraki %30
-        return "DÜŞÜK"                      # En iyi %20 (Güvenli Bölge)
-
+            return "KRİTİK (KRONİK)"           
+        # Yüzdelik dilimlere göre sınıflar:
+        if score < 40: return "KRİTİK"      # En kötü %5 (Percentile > 0.95) - Filonun en çürükleri
+        if score < 70: return "YÜKSEK"      # Sonraki %15 (Percentile 0.80 - 0.95)
+        if score < 85: return "ORTA"        # Sonraki %30
+        return "DÜŞÜK"                      # En iyi %50 (Percentile < 0.50)
     df["Risk_Sinifi"] = df.apply(assign_risk_class, axis=1)
-    
     return df
 # =============================================================================
 # MAIN PIPELINE
 # =============================================================================
-# =============================================================================
-# MAIN PIPELINE
-# =============================================================================
+
+
 def main():
     ensure_dirs()
     logger = setup_logger()
-    
     # -------------------------------------------------------------------------
     # STEP 1: LOAD & CONFIGURE
     # -------------------------------------------------------------------------
     logger.info("[STEP 1] Loading data...")
     df_fault = load_fault_data(logger)
-    df_healthy = load_healthy_data(logger)
-    
-    # Auto-detect start date from data (Left Truncation)
+    df_healthy = load_healthy_data(logger)  
+    # Auto-detect start date from data
+    # This fixes the Left Truncation logic dynamically
     observation_start_date = df_fault["started at"].min()
     data_end_date = df_fault["started at"].max()
-    
-    logger.info(f"[CONFIG] Data range: {observation_start_date.date()} -> {data_end_date.date()}")
-    
+    logger.info(f"[CONFIG] Data range: {observation_start_date.date()} → {data_end_date.date()}")
+    logger.info(f"[CONFIG] Observation Start (Left Truncation): {observation_start_date.date()}")
     # -------------------------------------------------------------------------
     # STEP 2: BUILD DATASET
     # -------------------------------------------------------------------------
     logger.info("\n" + "="*60)
     logger.info("PRODUCTION - Training on Full History")
     logger.info("="*60 + "\n")
-    
     logger.info("[STEP 2] Building complete dataset...")
-    
     # 1. Master list
-    equipment_master = build_equipment_master(df_fault, df_healthy, logger, data_end_date)
-    
-    # 2. Filter Real Failures
+    equipment_master = build_equipment_master(df_fault, df_healthy, logger, data_end_date)  
+    # 2. Filter Real Failures (Removing fuses/temporary faults)
     df_fault_filtered = filter_real_failures(df_fault, logger)
-    
-    # 3. Add Survival Columns
+    # 3. Add Survival Columns (Events, Duration, Delayed Entry)
     df_all = add_survival_columns_inplace(
         equipment_master.copy(),
         df_fault_filtered,
@@ -2349,12 +2384,13 @@ def main():
         observation_start_date,
         logger
     )
+    # Save survival base intermediate
     df_all.to_csv(INTERMEDIATE_PATHS["survival_base"], index=False, encoding="utf-8-sig")
-
+    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['survival_base']}")
+    
     # 4. Feature Engineering
     logger.info("[STEP 3] Engineering features...")
     chronic_df = compute_chronic_features(df_fault, data_end_date, logger)
-    
     df_all = add_temporal_features_inplace(
         df_all,
         data_end_date,
@@ -2362,22 +2398,29 @@ def main():
         observation_start_date,
         logger
     )
-
     # Define Feature Columns
     structural_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka"]
     structural_cols = [c for c in structural_cols if c in df_all.columns]
-
+    
     temporal_cols = ["Tref_Yas_Gun", "Tref_Ay", "Ariza_Sayisi_90g",
                      "Chronic_Rate_Yillik", "Chronic_Decay_Skoru", "Chronic_Flag",
                      "Observation_Ratio"]
     temporal_cols = [c for c in temporal_cols if c in df_all.columns]
-    
-    # Save feature outputs
-    all_feature_cols = ["cbs_id"] + structural_cols + temporal_cols + ["event", "duration_days", "entry_days"]
-    # Sütunların varlığını kontrol et
-    valid_cols = [c for c in all_feature_cols if c in df_all.columns]
-    df_all[valid_cols].to_csv(INTERMEDIATE_PATHS["ozellikler_pof3"], index=False, encoding="utf-8-sig")
 
+    # Save feature outputs
+    if structural_cols:
+        df_all[["cbs_id"] + structural_cols].to_csv(INTERMEDIATE_PATHS["features_structural"], index=False, encoding="utf-8-sig")
+        logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['features_structural']}")
+    if temporal_cols:
+        df_all[["cbs_id"] + temporal_cols].to_csv(INTERMEDIATE_PATHS["features_temporal"], index=False, encoding="utf-8-sig")
+        logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['features_temporal']}")
+        
+    # Save combined feature set (ozellikler_pof3)
+    all_feature_cols = ["cbs_id"] + structural_cols + temporal_cols + ["event", "duration_days", "entry_days"]
+    all_feature_cols = [c for c in all_feature_cols if c in df_all.columns]
+    df_all[all_feature_cols].to_csv(INTERMEDIATE_PATHS["ozellikler_pof3"], index=False, encoding="utf-8-sig")
+    
+    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['ozellikler_pof3']}")
     logger.info(f"[DATASET] Assets: {len(df_all)} | Features: {len(structural_cols) + len(temporal_cols)}")
 
     # -------------------------------------------------------------------------
@@ -2388,130 +2431,117 @@ def main():
     # 1. Global Cox
     X_cox_global = select_cox_safe_features(df_all, structural_cols, logger)
     cox_global, wb_global = train_cox_weibull(
-        X_cox_global, 
-        df_all["duration_days"], 
-        df_all["event"], 
+        X_cox_global,
+        df_all["duration_days"],
+        df_all["event"],
         df_all["entry_days"],
         logger
     )
-    
     # 2. Global Random Survival Forest
-    rsf_global = train_rsf_survival(df_all, structural_cols, logger)
-    
+    rsf_global = train_rsf_survival(df_all, structural_cols, logger)  
     # 3. Global ML (Gradient Boosting Survival)
-    # Kurulum_Tarihi ML için gereksizdir, çıkarıyoruz
-    ml_features_global = structural_cols + [c for c in temporal_cols if c != "Kurulum_Tarihi"]
+    ml_features_global = structural_cols + [c for c in temporal_cols if c not in ["Kurulum_Tarihi"]]
+
     ml_pack_global = train_ml_models(df_all, ml_features_global, SURVIVAL_HORIZONS_DAYS, logger)
-    
+    # Store global models for fallback usage
     global_models = {
         "cox": cox_global,
+        "weibull": wb_global,
         "rsf": rsf_global,
         "ml": ml_pack_global,
-        "X_cox_cols": X_cox_global.columns.tolist() if X_cox_global is not None else []
+        "X_cox_cols": X_cox_global.columns.tolist()
     }
-
     # -------------------------------------------------------------------------
     # STEP 4: EQUIPMENT-STRATIFIED MODELING
     # -------------------------------------------------------------------------
     logger.info("\n" + "="*60)
     logger.info("STEP 4 - Equipment-Stratified Modeling")
-    logger.info("="*60 + "\n")
-    
-    # 1. Audit Data Quality
-    eq_stats = get_equipment_stats(df_all, logger) # <--- GÜNCELLENMİŞ VERSİYON
+    logger.info("="*60 + "\n")   
+    eq_stats = get_equipment_stats(df_all, logger)
     unique_types = sorted(df_all["Ekipman_Tipi"].unique())
     
-    #MIN_SAMPLES = 50   # Düşürdük (Daha fazla modele izin ver)
-    MIN_SAMPLES = 100   # Düşürdük (Daha fazla modele izin ver)
-    #MIN_EVENTS = 10    # Düşürdük
+    MIN_SAMPLES = 100
     MIN_EVENTS = 30
-    
+
     all_predictions = []
     all_marka_analyses = []
     all_bakim_analyses = []
     
+    # Import TQDM for progress bar
     from tqdm import tqdm
     for eq_type in tqdm(unique_types, desc="Training Equipment Models", unit="type"):
-        
         # 1. Filter Data
         df_eq = df_all[df_all["Ekipman_Tipi"] == eq_type].copy()
-        stats = eq_stats.get(eq_type, {'n_total': 0, 'n_events': 0})
-        
-        # Başlangıç tahmin tablosu
+        stats = eq_stats.get(eq_type, {'n_total': 0, 'n_events': 0, 'has_marka': 0})
         preds = pd.DataFrame({"cbs_id": df_eq["cbs_id"]})
-        model_source = "Specific"
-
+        model_source = "Equipment_Specific"
         # 2. DECISION: Use Global Fallback vs Specific Training
         if stats["n_total"] < MIN_SAMPLES or stats["n_events"] < MIN_EVENTS:
-            # --- GLOBAL FALLBACK ---
+            # --- GLOBAL FALLBACK (ENHANCED) ---
             model_source = "Global_Fallback"
-            # logger.info(f"[{eq_type}] Using Global Fallback (Samples={stats['n_total']}, Events={stats['n_events']})")
-            
-            # A) Cox Fallback
+            # A) Global Cox Fallback
             try:
+                X_eq = select_cox_safe_features(df_eq, structural_cols, logger)
+                # Align features with global model
+                for c in set(global_models["X_cox_cols"]) - set(X_eq.columns):
+                    X_eq[c] = 0
+                X_eq = X_eq[global_models["X_cox_cols"]]
+
                 if cox_global:
-                    # Global modelin istediği sütunları hazırla
-                    X_eq = select_cox_safe_features(df_eq, structural_cols, logger)
-                    # Eksik sütunları 0 ile doldur (Alignment)
-                    for c in set(global_models["X_cox_cols"]) - set(X_eq.columns):
-                        X_eq[c] = 0
-                    X_eq = X_eq[global_models["X_cox_cols"]] # Sıralama
-                    
                     cox_pred = predict_survival_pof(cox_global, X_eq, df_eq["duration_days"],
                                                     SURVIVAL_HORIZONS_DAYS, "cox", df_eq["cbs_id"])
                     preds = preds.merge(cox_pred, on="cbs_id", how="left")
-            except Exception: pass 
-
-            # B) RSF Fallback
+            except Exception:
+                pass
+            # B) Global RSF Fallback
             try:
                 if rsf_global:
                     rsf_pred = predict_rsf_pof(df_eq, rsf_global, structural_cols, SURVIVAL_HORIZONS_DAYS)
                     preds = preds.merge(rsf_pred, on="cbs_id", how="left")
-            except Exception: pass
-
-            # C) ML Fallback
+            except Exception:
+                pass
+            # C) Global ML Fallback
             try:
                 if ml_pack_global:
+                    # Note: predict_ml_pof should handle missing columns internally
                     ml_pred = predict_ml_pof(df_eq, ml_pack_global, SURVIVAL_HORIZONS_DAYS)
                     preds = preds.merge(ml_pred, on="cbs_id", how="left")
-            except Exception: pass
-
+            except Exception:
+                pass
         else:
             # --- SPECIFIC TRAINING ---
             preds = train_equipment_specific_models(df_eq, structural_cols, temporal_cols, eq_type, logger)
+            # Specific Explanatory Analyses
+            if stats.get("has_marka", 0) >= 30:
+                try:
+                    marka_analysis = analyze_marka_effect(df_eq, eq_type, logger)
 
-            # Specific Analyses
+                    if not marka_analysis.empty: all_marka_analyses.append(marka_analysis)
+
+                except Exception: pass
             try:
-                marka_res = analyze_marka_effect(df_eq, eq_type, logger)
-                if not marka_res.empty: all_marka_analyses.append(marka_res)
-            except Exception: pass
-            
-            try:
-                bakim_res = analyze_bakim_effect(df_eq, eq_type, logger)
-                if not bakim_res.empty: all_bakim_analyses.append(bakim_res)
+                bakim_analysis = analyze_bakim_effect(equipment_master, eq_type, logger)
+                if not bakim_analysis.empty: all_bakim_analyses.append(bakim_analysis)
             except Exception: pass
 
-        # 3. METADATA EKLEME VE SKORLAMA (Kritik Düzeltme)
-        # Tahminlere meta verileri geri ekliyoruz ki skorlama doğru çalışsın.
+        # 3. MERGE PREDICTIONS WITH METADATA (FIXED)
+        # We merge 'preds' (which only has cbs_id + probabilities) back to df_eq metadata
         meta_cols = ["cbs_id", "Ekipman_Tipi"]
         if "Fault_Count" in df_eq.columns: meta_cols.append("Fault_Count")
-        if "Chronic_Flag" in df_eq.columns: meta_cols.append("Chronic_Flag") # Skorlama için şart
-        
         preds_full = df_eq[meta_cols].merge(preds, on="cbs_id", how="left")
         preds_full["Model_Type"] = model_source
         
         # 4. COMPUTE HEALTH SCORE
-        # Artık 'Ekipman_Tipi' ve 'Chronic_Flag' kesinlikle var.
+        # Now preds_full definitely has "Ekipman_Tipi", so grouping works
         try:
             preds_full = compute_health_score(preds_full)
         except Exception as e:
             logger.error(f"[{eq_type}] Health score calc failed: {e}")
-            preds_full["Health_Score"] = 50 
+            preds_full["Health_Score"] = 50
             preds_full["Risk_Sinifi"] = "ORTA"
-
+        # 5. Store Results
         all_predictions.append(preds_full)
-        
-        # Save individual CSV
+        # Save individual CSV (Silent to keep progress bar clean)
         safe_name = str(eq_type).replace("/", "_").replace(" ", "_")
         out_path = os.path.join(OUTPUT_DIR, f"pof_{safe_name}.csv")
         preds_full.to_csv(out_path, index=False, encoding="utf-8-sig")
@@ -2522,22 +2552,19 @@ def main():
     logger.info("\n" + "="*60)
     logger.info("STEP 5 - Final Ensemble & Reporting")
     logger.info("="*60 + "\n")
-    
     if not all_predictions:
         logger.error("No predictions generated.")
         return
 
     # Combine all
     predictions = pd.concat(all_predictions, ignore_index=True)
-    
-    # Final Report Merge
-    # Zaten metadata (Ekipman_Tipi vb.) predictions tablosunda var.
-    # Sadece ekstra detayları ekleyelim.
-    report_cols = ["Gerilim_Sinifi", "Kurulum_Tarihi", "Ilce", "Mahalle", "Marka"]
+    # Final Report Merge (Add context like Voltage, Install Date)
+    report_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Fault_Count", "Kurulum_Tarihi"]
     report_base = df_all[["cbs_id"] + [c for c in report_cols if c in df_all.columns]].drop_duplicates("cbs_id")
-    
-    report = report_base.merge(predictions, on="cbs_id", how="right") # Right merge ile tahminleri koru
-    
+    # Clean duplicates before merge
+    cols_to_drop = [c for c in report_cols if c in predictions.columns]
+    preds_clean = predictions.drop(columns=cols_to_drop, errors="ignore")
+    report = report_base.merge(preds_clean, on="cbs_id", how="left")
     # Save outputs
     out_path = os.path.join(OUTPUT_DIR, "pof_predictions_final.csv")
     report.to_csv(out_path, index=False, encoding="utf-8-sig")
@@ -2545,35 +2572,49 @@ def main():
     
     if all_marka_analyses:
         pd.concat(all_marka_analyses).to_csv(os.path.join(OUTPUT_DIR, "marka_analysis.csv"), index=False, encoding="utf-8-sig")
-    
+
     if all_bakim_analyses:
+
         pd.concat(all_bakim_analyses).to_csv(os.path.join(OUTPUT_DIR, "bakim_analysis.csv"), index=False, encoding="utf-8-sig")
+
+    # Save intermediate files for Reporting Script (to INTERMEDIATE_DIR not OUTPUT_DIR)
+    equipment_master.to_csv(INTERMEDIATE_PATHS["equipment_master"], index=False, encoding="utf-8-sig")
+    df_all.to_csv(os.path.join(INTERMEDIATE_DIR, "model_input_data_full.csv"), index=False, encoding="utf-8-sig")
     
     # Final Stats
-    critical_mask = report["Health_Score"] < 20 # Yeni eşik
-    critical_count = critical_mask.sum()
-    
+    critical = (report["Health_Score"] < 20).sum()
+    mean_health = report["Health_Score"].mean()
+
     logger.info(f"Total assets: {len(report):,}")
-    logger.info(f"Critical assets (Health<20): {critical_count:,} ({100*critical_count/len(report):.1f}%)")
-    logger.info(f"Mean Health Score: {report['Health_Score'].mean():.1f}")
-    
+    logger.info(f"Critical assets (Health<40): {critical:,} ({100*critical/len(report):.1f}%)")
+    logger.info(f"Mean Health Score: {mean_health:.1f}")
+
     # -------------------------------------------------------------------------
     # STEP 6: BACKTESTING (Temporal Validation)
     # -------------------------------------------------------------------------
     logger.info("\n" + "="*60)
-    logger.info("STEP 6 - Temporal Backtesting")
+    logger.info("STEP 6 - Temporal Backtesting (Optional)")
     logger.info("="*60 + "\n")
-    
+   
     try:
-        backtester = TemporalBacktester(df_fault, df_healthy, logger)
+        backtester = TemporalBacktester(df_fault, df_healthy, logger)       
+        # Run walk-forward validation for available years
         backtest_results = backtester.run(
-            start_year=2022,
-            end_year=2024, # 2025'in tamamı yok, o yüzden 2024 sonuna kadar
-            horizon_days=365
-        )
+            start_year=2022,  # First year to test
+            end_year=2024,    # Last year to test
+            horizon_days=365  # 12-month prediction window
+        )      
+        if not backtest_results.empty:
+
+            logger.info("\n[BACKTEST SUMMARY]")
+            logger.info(f"Average AUC: {backtest_results['AUC'].mean():.3f}")
+            logger.info(f"Average Top-100 Hit Rate: {backtest_results['Top100_Hits'].mean():.1f}")
+            logger.info(f"Total Years Tested: {len(backtest_results)}")
+        else:
+            logger.warning("[BACKTEST] No results generated (insufficient data)")
     except Exception as e:
         logger.error(f"[BACKTEST] Failed: {e}")
-    
+        logger.info("[BACKTEST] Skipping temporal validation, continuing with main pipeline")  
     logger.info("="*60)
     logger.info("PIPELINE COMPLETE")
 

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-05_raporlama_ve_gorsellestirme.py (PoF3 - Ultimate Reporting Engine v3.3)
+raporlama_ve_gorsellestirme.py (PoF - Ultimate Reporting Engine v3.3)
 FIXES:
 1. Auto-calculates 'PoF_Ensemble_12Ay' if missing.
 2. Robust merging logic for Case Studies.
@@ -46,7 +46,20 @@ for d in [ACTION_DIR, VISUAL_DIR]:
 # Görsel Ayarları
 plt.style.use('ggplot')
 sns.set_palette("husl")
-
+# =============================================================================
+# 🛠️ UTILITIES: LOGGING & DATA REPAIR (LOGLAMA VE VERİ ONARIMI)
+# =============================================================================
+# 1. setup_logger:
+#    - Raporlama sürecinin her adımını kayıt altına alır.
+#    - Hataları hem ekrana basar hem dosyaya kaydeder.
+#
+# 2. ensure_pof_column (Hayat Kurtarıcı):
+#    - Raporların ana metriği 'PoF_Ensemble_12Ay' sütunudur.
+#    - Eğer önceki aşamada (pof.py) bu sütun üretilemediyse (örn. sadece tek model çalıştıysa),
+#      bu fonksiyon devreye girer.
+#    - Mevcut diğer 12 aylık tahminleri (Cox, ML vb.) bulur ve onların ortalamasını
+#      alarak eksik sütunu "imal eder". Böylece raporlama çökmez.
+# =============================================================================
 # ------------------------------------------------------------------------------
 # LOGGING
 # ------------------------------------------------------------------------------
@@ -94,56 +107,130 @@ def ensure_pof_column(df, logger):
 # ------------------------------------------------------------------------------
 # PHASE 1: ACTION PLANNING
 # ------------------------------------------------------------------------------
+# =============================================================================
+# 📋 ACTIONABLE INTELLIGENCE (AKSİYON LİSTELERİ)
+# =============================================================================
+# Bu fonksiyon, matematiksel sonuçları "Sahada Yapılacak İşlere" dönüştürür.
+#
+# 1. 🚨 Acil Müdahale (Priority 1):
+#    - Hem "Kronik" (Sürekli bozulan) hem de "Kritik Risk" (Ömrünü tamamlamış) varlıklar.
+#    - Aksiyon: Derhal yerinde inceleme veya değişim.
+#
+# 2. 💰 CAPEX / Yatırım (Priority 2):
+#    - Özellikle Trafolar gibi pahalı ve tedariği uzun süren ekipmanlar.
+#    - Yüksek riskli trafolar belirlenip, gelecek yılın bütçesine değişim olarak girmeli.
+#
+# 3. 🔍 Fırsat Bakımı / OPEX (Priority 3):
+#    - Model diyor ki: "Bu varlık henüz Kritik sınıfa girmedi (belki yaşı genç),
+#      AMA önümüzdeki 12 ay içinde bozulma ihtimali yükseliyor (%15+)."
+#    - Aksiyon: Önleyici bakım (Termal kamera, yağ analizi) ile kurtarılabilir.
+# =============================================================================
 def generate_action_lists(df, logger):
+    """
+    Operasyonel aksiyon listelerini (CSV) oluşturur.
+    Bakım ekipleri için okunabilir, temiz raporlar üretir.
+    """
     logger.info("="*60)
     logger.info("[PHASE 1] Aksiyon Listeleri Oluşturuluyor...")
     
-    # Kolon eşleştirme (Risk_Class yoksa Risk_Sinifi kullan)
-    risk_col = 'Risk_Class' if 'Risk_Class' in df.columns else 'Risk_Sinifi'
+    # 1. Kolon Standardizasyonu (Defensive Coding)
+    risk_col = 'Risk_Sinifi'
+    if 'Risk_Class' in df.columns: risk_col = 'Risk_Class'
     
-    # 1. ACİL MÜDAHALE (Kritik + Kronik)
-    if 'Kronik_Flag' in df.columns:
+    chronic_col = 'Chronic_Flag'
+    if 'Kronik_Flag' in df.columns: chronic_col = 'Kronik_Flag' # Manuel değişim varsa yakala
+
+    # 2. Raporlarda Görünecek Temiz Sütunlar (Human-Readable)
+    # Bakımcının işine yaramayan VIF skorlarını, one-hot sütunlarını rapora koymuyoruz.
+    report_cols = [
+        "cbs_id", "Ekipman_Tipi", "Ilce", "Mahalle", "Marka",
+        "Kurulum_Tarihi", "Gerilim_Seviyesi", 
+        "Health_Score", risk_col, "PoF_Ensemble_12Ay", 
+        chronic_col, "Ariza_Sayisi_90g"
+    ]
+    # Sadece veride var olanları seç
+    final_cols = [c for c in report_cols if c in df.columns]
+
+    # --- LİSTE 1: ACİL MÜDAHALE (Kritik + Kronik) ---
+    # Hem çok riskli hem de sürekli arıza yapıyor. Hemen bakılmalı.
+    if chronic_col in df.columns:
         crit_chronic = df[
-            (df[risk_col].isin(['Critical', 'KRİTİK'])) & 
-            (df['Kronik_Flag'] == 1)
+            (df[risk_col].isin(['Critical', 'KRİTİK', 'KRİTİK (KRONİK)'])) & 
+            (df[chronic_col] == 1)
         ].copy()
     else:
         crit_chronic = pd.DataFrame()
     
     if not crit_chronic.empty:
-        path = os.path.join(ACTION_DIR, "01_acil_mudahale_listesi.csv")
-        crit_chronic.to_csv(path, index=False, encoding='utf-8-sig')
-        logger.info(f"  > [ACİL] Kronik & Kritik: {len(crit_chronic)} varlık")
+        # En riskliden aza doğru sırala
+        crit_chronic = crit_chronic.sort_values("PoF_Ensemble_12Ay", ascending=False)
+        
+        path = os.path.join(ACTION_DIR, "01_ACIL_MUDHALE_LISTESI_Kronik.csv")
+        crit_chronic[final_cols].to_csv(path, index=False, encoding='utf-8-sig')
+        logger.info(f"  🚨 [ACİL] Kronik & Kritik: {len(crit_chronic)} varlık (Dosya: 01_...)")
+    else:
+        logger.info("  ✅ [ACİL] Kronik ve Kritik varlık bulunamadı.")
 
-    # 2. YÜKSEK RİSKLİ TRAFOLAR (CAPEX)
+    # --- LİSTE 2: YÜKSEK RİSKLİ TRAFOLAR (CAPEX Yatırım Planı) ---
+    # Trafolar pahalıdır. Yüksek riskli olanların değişimi bütçelenmeli.
     trafos = df[
-        (df['Ekipman_Tipi'].str.contains('Trafo', na=False)) & 
-        (df[risk_col].isin(['Critical', 'High', 'KRİTİK', 'YÜKSEK']))
+        (df['Ekipman_Tipi'].astype(str).str.contains('Trafo', case=False, na=False)) & 
+        (df[risk_col].isin(['Critical', 'High', 'KRİTİK', 'YÜKSEK', 'KRİTİK (KRONİK)']))
     ].copy()
     
     if not trafos.empty:
-        path = os.path.join(ACTION_DIR, "02_yuksek_riskli_trafolar_capex.csv")
-        trafos.to_csv(path, index=False, encoding='utf-8-sig')
-        logger.info(f"  > [CAPEX] Yüksek Riskli Trafolar: {len(trafos)} varlık")
+        trafos = trafos.sort_values("Health_Score", ascending=True) # En düşük puan en üstte
+        path = os.path.join(ACTION_DIR, "02_YATIRIM_PLANLAMA_Riskli_Trafolar.csv")
+        trafos[final_cols].to_csv(path, index=False, encoding='utf-8-sig')
+        logger.info(f"  💰 [CAPEX] Yüksek Riskli Trafolar: {len(trafos)} varlık")
 
-    # 3. İŞLETME KONTROL (Yüksek Olasılık ama Düşük Etki olabilir)
+    # --- LİSTE 3: İŞLETME KONTROL (Fırsat Bakımı / Quick Wins) ---
+    # Risk sınıfı henüz 'Kritik' değil ama Bozulma İhtimali (PoF) artmaya başlamış.
+    # "Henüz yangın çıkmadı ama duman tütüyor" listesi.
     if 'PoF_Ensemble_12Ay' in df.columns:
         inspection = df[
-            (df['PoF_Ensemble_12Ay'] > 0.10) & 
-            (df[risk_col].isin(['Low', 'Medium', 'DÜŞÜK', 'ORTA']))
+            (df['PoF_Ensemble_12Ay'] > 0.15) &  # %15 üzeri ihtimal
+            (df[risk_col].isin(['Low', 'Medium', 'DÜŞÜK', 'ORTA'])) # Ama sınıfı düşük
         ].copy()
         
         if not inspection.empty:
-            path = os.path.join(ACTION_DIR, "03_bakim_rotasi_kontrol.csv")
-            inspection.sort_values('PoF_Ensemble_12Ay', ascending=False).to_csv(path, index=False, encoding='utf-8-sig')
-            logger.info(f"  > [OPEX] Yüksek Olasılık/Düşük Risk Sınıfı: {len(inspection)} varlık")
+            inspection = inspection.sort_values('PoF_Ensemble_12Ay', ascending=False)
+            path = os.path.join(ACTION_DIR, "03_ISLETME_KONTROL_Firsat_Bakimi.csv")
+            inspection[final_cols].to_csv(path, index=False, encoding='utf-8-sig')
+            logger.info(f"  🔍 [OPEX] Fırsat Bakımı (Yüksek Olasılık/Düşük Risk): {len(inspection)} varlık")
 
-    return crit_chronic
+    return crit_chronic # Dashboard için kritik listeyi döndür
 
 # ------------------------------------------------------------------------------
 # PHASE 2: VISUALIZATION
 # ------------------------------------------------------------------------------
+# =============================================================================
+# 📊 VISUALIZATION & REALITY CHECK (GÖRSELLEŞTİRME VE DOĞRULAMA)
+# =============================================================================
+# Bu modül, karmaşık model çıktılarını (olasılıklar, katsayılar) yöneticilerin
+# anlayabileceği görsel içgörülere dönüştürür ve modelin "akıl sağlığını" test eder.
+#
+# 1. 🌍 Coğrafi Risk Haritası (generate_visuals):
+#    - Risklerin mekansal dağılımını gösterir.
+#    - "Hangi ilçede veya şebeke kolunda risk birikmiş?" sorusuna cevap verir.
+#
+# 2. 🧪 Kalibrasyon & Validasyon (validate_base_rates):
+#    - EN KRİTİK GÜVENLİK ADIMIDIR.
+#    - Modelin sonuçlarını CIGRE/IEEE endüstri standartlarıyla kıyaslar.
+#    - Örnek: Eğer model Trafoların %50'sinin seneye bozulacağını söylüyorsa,
+#      bu fonksiyon "HATA: Endüstri standardı %2-5 arasıdır, model aşırı kötümser!"
+#      diye uyarır. Bu, "Model Halüsinasyonunu" engeller.
+#
+# 3. 📈 Stratejik Ayrım (plot_aggregate_risk_by_type):
+#    - Çift Eksenli Grafik (Dual-Axis):
+#      a. Bar (Sol): Yaşlanma/Yıpranma Riski (PoF).
+#      b. Çizgi (Sağ): Kronik/Operasyonel Sorunlar.
+#    - Bu ayrım, yatırımın nereye yapılacağını (Yeni cihaz mı? Tamir mi?) belirler.
+# =============================================================================
 def plot_single_chart(df, col_x, col_y, plot_type, title, filename, logger, **kwargs):
+    """
+    Genel amaçlı, hata korumalı grafik çizim fonksiyonu.
+    """
     width = kwargs.pop('width', 10)
     height = kwargs.pop('height', 6)
     
@@ -157,371 +244,819 @@ def plot_single_chart(df, col_x, col_y, plot_type, title, filename, logger, **kw
         elif plot_type == 'bar':
             sns.barplot(x=col_x, y=col_y, data=df, **kwargs)
 
-        plt.title(title, fontsize=14)
+        plt.title(title, fontsize=14, fontweight='bold')
         plt.tight_layout()
         path = os.path.join(VISUAL_DIR, filename)
         plt.savefig(path, dpi=300, bbox_inches='tight')
         plt.close()
-        logger.info(f"  > Kaydedildi: {filename}")
+        logger.info(f"  📸 Grafik oluşturuldu: {filename}")
         return path
     except Exception as e:
-        logger.error(f"  [ERROR] Grafik çizilemedi {filename}: {str(e)}")
+        logger.error(f"  ❌ [ERROR] Grafik çizilemedi ({filename}): {str(e)}")
         plt.close()
         return None
+# ------------------------------------------------------------------------------
+# PHASE 2.5: ADVANCED DIAGNOSTICS (SİZİN GÖRSELLERİNİZ)
+# ------------------------------------------------------------------------------
 
+def plot_risk_drivers(df_model, logger):
+    """
+    GÖRSEL 1: Risk Faktörleri (Korelasyon Analizi)
+    Veri Kaynağı: model_input_data_full.csv (pof.py ara çıktısı)
+    """
+    logger.info("[ADVANCED] Risk Faktörleri (Drivers) analiz ediliyor...")
+    
+    # Sayısal kolonları seç
+    num_cols = df_model.select_dtypes(include=[np.number]).columns
+    if 'event' not in num_cols: return None
+
+    # Korelasyon hesapla (Target: event)
+    corrs = df_model[num_cols].corrwith(df_model['event']).sort_values(ascending=False)
+    
+    # En etkili 10 faktör (Kendisi hariç)
+    top_drivers = corrs.drop('event', errors='ignore').head(5)
+    bottom_drivers = corrs.drop('event', errors='ignore').tail(5)
+    drivers = pd.concat([top_drivers, bottom_drivers]).sort_values()
+
+    plt.figure(figsize=(10, 6))
+    colors = ['green' if x < 0 else 'red' for x in drivers.values]
+    drivers.plot(kind='barh', color=colors, edgecolor='black', alpha=0.8)
+    
+    plt.title('Risk Faktörleri (Drivers) - Arıza ile Korelasyon', fontsize=16)
+    plt.xlabel('Korelasyon Katsayısı (Sağ taraf risk arttırıcı)', fontsize=10)
+    plt.grid(True, linestyle='--', alpha=0.5)
+    
+    path = os.path.join(VISUAL_DIR, "ADV_01_Risk_Drivers.png")
+    plt.savefig(path, dpi=300, bbox_inches='tight')
+    plt.close()
+    return path
+
+def plot_operational_dashboard(logger):
+    """
+    GÖRSEL 2: Operasyonel Durum (4'lü Dashboard)
+    Veri Kaynağı: fault_events_clean.csv
+    """
+    path = os.path.join(INTERMEDIATE_DIR, "fault_events_clean.csv")
+    if not os.path.exists(path): return None
+    
+    df = pd.read_csv(path)
+    df['started at'] = pd.to_datetime(df['started at'])
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle('Operasyonel Durum Paneli', fontsize=24)
+    
+    # 1. Aylık Arıza Trendi
+    df['Ay'] = df['started at'].dt.to_period('M')
+    monthly = df.groupby('Ay').size()
+    monthly.index = monthly.index.astype(str)
+    axes[0, 0].plot(monthly.index, monthly.values, marker='o', linestyle='-', color='steelblue')
+    axes[0, 0].set_title('Aylık Arıza Trendi')
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    # X eksenini seyrelt
+    axes[0, 0].set_xticks(axes[0, 0].get_xticks()[::3])
+
+    # 2. En Çok Arızalanan Ekipmanlar
+    top_eq = df['Ekipman_Tipi'].value_counts().head(5)
+    sns.barplot(y=top_eq.index, x=top_eq.values, ax=axes[0, 1], palette='Oranges_r')
+    axes[0, 1].set_title('En Çok Arızalanan Ekipmanlar')
+
+    # 3. Haftalık Yoğunluk (Heatmap yerine Line/Area)
+    df['Hafta'] = df['started at'].dt.isocalendar().week
+    weekly = df.groupby('Hafta').size()
+    axes[1, 0].fill_between(weekly.index, weekly.values, color='lightcoral', alpha=0.5)
+    axes[1, 0].plot(weekly.index, weekly.values, color='red')
+    axes[1, 0].set_title('Haftalık Arıza Yoğunluğu (Mevsimsellik)')
+
+    # 4. Saatlik Dağılım
+    df['Saat'] = df['started at'].dt.hour
+    hourly = df.groupby('Saat').size()
+    sns.barplot(x=hourly.index, y=hourly.values, ax=axes[1, 1], color='purple')
+    axes[1, 1].set_title('Saatlik Arıza Dağılımı')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    out_path = os.path.join(VISUAL_DIR, "ADV_02_Operasyonel_Durum.png")
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    return out_path
+
+def plot_survival_curves(df_model, logger):
+    """
+    GÖRSEL 3: Ömür Eğrileri (Kaplan-Meier)
+    Veri Kaynağı: model_input_data_full.csv
+    """
+    try:
+        from lifelines import KaplanMeierFitter
+    except ImportError:
+        return None
+
+    plt.figure(figsize=(10, 6))
+    kmf = KaplanMeierFitter()
+    
+    # En popüler 4 ekipman tipi
+    top_types = df_model['Ekipman_Tipi'].value_counts().head(4).index
+    
+    for etype in top_types:
+        subset = df_model[df_model['Ekipman_Tipi'] == etype]
+        kmf.fit(subset['duration_days'], event_observed=subset['event'], label=etype)
+        kmf.plot(ci_show=False)
+
+    plt.title('Varlık Ömür Eğrileri (Survival Curves)', fontsize=16)
+    plt.xlabel('Gün (Timeline)')
+    plt.ylabel('Hayatta Kalma Olasılığı S(t)')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    
+    path = os.path.join(VISUAL_DIR, "ADV_03_Omur_Egrileri.png")
+    plt.savefig(path, dpi=300)
+    plt.close()
+    return path
+
+def plot_health_dashboard(df_res, logger):
+    """
+    GÖRSEL 4: Sağlık Analizi (Composite Dashboard)
+    Veri Kaynağı: pof_predictions_final.csv
+    """
+    fig = plt.figure(figsize=(14, 8))
+    gs = fig.add_gridspec(2, 2)
+    fig.suptitle('Sağlık Analizi Dashboard', fontsize=22)
+
+    # 1. Sağlık Skoru Dağılımı (Histogram)
+    ax1 = fig.add_subplot(gs[0, 0])
+    sns.histplot(df_res['Health_Score'], bins=30, kde=True, color='green', ax=ax1)
+    ax1.axvline(x=40, color='red', linestyle='--', label='Kritik Eşik (40)')
+    ax1.set_title('Sağlık Skoru Dağılımı')
+    ax1.legend()
+
+    # 2. Tip Bazlı Ortalama Sağlık (Bar)
+    ax2 = fig.add_subplot(gs[0, 1])
+    avg_health = df_res.groupby('Ekipman_Tipi')['Health_Score'].mean().sort_values().head(8)
+    sns.barplot(y=avg_health.index, x=avg_health.values, ax=ax2, palette='RdYlGn')
+    ax2.set_title('En Düşük Sağlık Skoruna Sahip Tipler')
+    ax2.set_xlim(0, 100)
+
+    # 3. Risk Sınıfı Pasta Grafiği
+    ax3 = fig.add_subplot(gs[1, 0])
+    risk_col = 'Risk_Class' if 'Risk_Class' in df_res.columns else 'Risk_Sinifi'
+    counts = df_res[risk_col].value_counts()
+    
+    # Renkleri sabitle
+    colors = {'Low': '#66b3ff', 'DÜŞÜK': '#66b3ff', 
+              'Medium': '#ffcc99', 'ORTA': '#ffcc99',
+              'High': '#ff9999', 'YÜKSEK': '#ff9999',
+              'Critical': '#ff0000', 'KRİTİK': '#ff0000'}
+    pie_colors = [colors.get(x, 'grey') for x in counts.index]
+    
+    ax3.pie(counts, labels=counts.index, autopct='%1.1f%%', colors=pie_colors, startangle=140)
+    ax3.set_title('Risk Sınıfı Dağılımı')
+
+    # 4. Boş Alan (Veya Metin Özeti)
+    ax4 = fig.add_subplot(gs[1, 1])
+    ax4.axis('off')
+    summary_text = (
+        f"Toplam Varlık: {len(df_res):,}\n"
+        f"Ortalama Sağlık: {df_res['Health_Score'].mean():.1f}\n"
+        f"Kritik Varlıklar: {counts.get('KRİTİK', 0) + counts.get('Critical', 0)}\n\n"
+        "Not: Kırmızı bölge acil aksiyon gerektirir."
+    )
+    ax4.text(0.1, 0.5, summary_text, fontsize=14, bbox=dict(facecolor='wheat', alpha=0.3))
+
+    path = os.path.join(VISUAL_DIR, "ADV_04_Saglik_Analizi.png")
+    plt.savefig(path, dpi=300)
+    plt.close()
+    return path
 def generate_visuals(df, logger):
+    """
+    Tüm görsel panoları (Dashboard elementleri) oluşturur.
+    """
     logger.info("="*60)
     logger.info("[PHASE 2] Görsel Panolar Oluşturuluyor...")
     charts = {}
     
-    # Risk Kolonunu Belirle
-    risk_col = 'Risk_Class' if 'Risk_Class' in df.columns else 'Risk_Sinifi'
+    # Risk Kolonunu Belirle (Standartlaştırma)
+    risk_col = 'Risk_Sinifi'
+    if 'Risk_Class' in df.columns: risk_col = 'Risk_Class'
 
-    # 1. SAĞLIK SKORU DAĞILIMI
+    # 1. SAĞLIK SKORU DAĞILIMI (Histogram)
+    # Filonun genel sağlık durumunu gösterir.
     if 'Health_Score' in df.columns:
         path = plot_single_chart(df, 'Health_Score', None, 'hist', 
-                                 'Varlık Sağlık Skoru Dağılımı', "02_saglik_skoru_dagilimi.png", logger,
-                                 bins=30, color='teal', edgecolor='black')
+                                 'Varlık Sağlık Skoru Dağılımı (0=Ölü, 100=Mükemmel)', 
+                                 "02_saglik_skoru_dagilimi.png", logger,
+                                 bins=40, color='teal', edgecolor='black')
         charts['health_dist'] = path
 
-    # 2. KRONİK ANALİZİ
-    if 'Chronic_Flag' in df.columns:
-        counts = df['Chronic_Flag'].value_counts()
+    # 2. KRONİK ANALİZİ (Bar Chart)
+    # Hangi ekipmanlar sürekli baş ağrıtıyor?
+    chronic_col = 'Chronic_Flag' if 'Chronic_Flag' in df.columns else 'Kronik_Flag'
+    
+    if chronic_col in df.columns:
+        counts = df[chronic_col].value_counts()
         plt.figure(figsize=(8, 6))
-        counts.plot(kind='bar', color=['green', 'red'], edgecolor='black')
-        plt.title('Kronik Varlık Dağılımı (0=Normal, 1=Kronik)', fontsize=14)
+        # 0: Yeşil (Normal), 1: Kırmızı (Kronik)
+        colors = ['green', 'red'] if len(counts) == 2 else ['green']
+        
+        counts.plot(kind='bar', color=colors, edgecolor='black', alpha=0.8)
+        plt.title('Kronik Varlık Dağılımı (1 = Kronik Sorunlu)', fontsize=14)
+        plt.xlabel("Durum (0: Normal, 1: Kronik)")
+        plt.ylabel("Varlık Sayısı")
         plt.xticks(rotation=0)
+        
         path = os.path.join(VISUAL_DIR, "03_kronik_dagilimi.png")
         plt.savefig(path, dpi=300, bbox_inches='tight')
         plt.close()
         charts['chronic_dist'] = path
 
-    # 3. COĞRAFİ HARİTA (Varsa)
+    # 3. COĞRAFİ HARİTA (Scatter Plot)
+    # Risklerin mekansal dağılımı.
     if 'Latitude' in df.columns and 'Longitude' in df.columns:
-        gdf = df[(df['Latitude'] != 0) & (df['Longitude'] != 0)].copy()
+        # Koordinatı 0 olmayanları al (Veri temizliği)
+        gdf = df[(df['Latitude'] != 0) & (df['Longitude'] != 0) & (df['Latitude'].notna())].copy()
+        
         if not gdf.empty:
-                palette_map = {
-                    'Critical': 'red', 'High': 'orange', 'Medium': 'gold', 'Low': 'green',
-                    'KRİTİK': 'red', 'YÜKSEK': 'orange', 'ORTA': 'gold', 'DÜŞÜK': 'green'
-                }
-                # Bilinmeyenleri gri yap
-                for label in gdf[risk_col].unique():
-                    if label not in palette_map: palette_map[label] = 'gray'
+            # Renk Haritası (Risk Sınıfına Göre)
+            palette_map = {
+                'Critical': 'red', 'High': 'orange', 'Medium': 'gold', 'Low': 'green',
+                'KRİTİK': 'red', 'KRİTİK (KRONİK)': 'purple', 'YÜKSEK': 'orange', 
+                'ORTA': 'gold', 'DÜŞÜK': 'green'
+            }
+            
+            # Haritada olmayan etiketleri gri yap
+            for label in gdf[risk_col].unique():
+                if label not in palette_map: palette_map[label] = 'gray'
 
-                path = plot_single_chart(gdf, 'Longitude', 'Latitude', 'scatter', 
-                                        'Coğrafi Risk Haritası', "04_cografi_risk_haritasi.png", logger,
-                                        hue=risk_col, height=10, width=10,
-                                        palette=palette_map, s=30, alpha=0.8)
-                charts['geo_map'] = path
+            path = plot_single_chart(gdf, 'Longitude', 'Latitude', 'scatter', 
+                                     'Coğrafi Risk Haritası', "04_cografi_risk_haritasi.png", logger,
+                                     hue=risk_col, height=10, width=10,
+                                     palette=palette_map, s=40, alpha=0.7, edgecolor='k')
+            charts['geo_map'] = path
 
     return charts
 
 def validate_base_rates(df, logger):
+    """
+    Modelin sonuçlarını Endüstri Standartları ile kıyaslar (Reality Check).
+    """
     logger.info("="*60)
-    logger.info("[VALIDATION] Model Kalibrasyon Kontrolü (Sektör Ortalamaları ile)...")
+    logger.info("[VALIDATION] Model Kalibrasyon Kontrolü...")
     
-    # Sektör beklentileri (yıllık arıza oranı)
+    # Sektör beklentileri (Yıllık Arıza Oranı - Failure Rate)
+    # Kaynak: CIGRE ve IEEE standartları (yaklaşık)
     INDUSTRY_RANGES = {
-        'Trafo': (0.005, 0.05), 'Kesici': (0.01, 0.08), 'Ayırıcı': (0.02, 0.12),
-        'Sigorta': (0.10, 0.40), 'Hat': (0.005, 0.15), 'Direk': (0.001, 0.03)
+        'Trafo': (0.005, 0.05),   # %0.5 - %5 arası normal
+        'Kesici': (0.01, 0.08),   # %1 - %8
+        'Ayırıcı': (0.02, 0.12),  # Ayırıcılar daha sık bozulur
+        'Sigorta': (0.10, 0.40),  # Sigortalar sarf malzemesidir, çok bozulur
+        'Hat': (0.005, 0.15),     # Hava şartlarına bağlı
+        'Direk': (0.001, 0.03)    # Direkler nadir yıkılır
     }
     
-    if 'PoF_Ensemble_12Ay' not in df.columns:
-        logger.warning("  [SKIP] PoF kolonu yok. Validasyon yapılamıyor.")
+    target_col = 'PoF_Ensemble_12Ay'
+    if target_col not in df.columns:
+        logger.warning("  ⚠️ [SKIP] PoF kolonu yok. Validasyon yapılamıyor.")
         return
 
-    stats = df.groupby('Ekipman_Tipi')['PoF_Ensemble_12Ay'].mean().reset_index()
-    stats.columns = ['Type', 'Predicted_Rate']
+    # Ekipman tipine göre ortalama tahminleri al
+    stats = df.groupby('Ekipman_Tipi')[target_col].mean().reset_index()
     
     for _, row in stats.iterrows():
-        etype = row['Type']
-        pred = row['Predicted_Rate']
-        # Eşleşen anahtar kelime bul
-        matched_key = next((k for k in INDUSTRY_RANGES if k in str(etype)), None)
+        etype = str(row['Ekipman_Tipi'])
+        pred = row[target_col]
+        
+        # Ekipman isminde anahtar kelime ara (örn: "OG Trafo" içinde "Trafo" var mı?)
+        matched_key = next((k for k in INDUSTRY_RANGES if k in etype), None)
         
         if matched_key:
             low, high = INDUSTRY_RANGES[matched_key]
             status = "✅ OK"
-            if pred < low: status = "📉 DÜŞÜK"
-            if pred > high: status = "🚨 YÜKSEK"
-            logger.info(f"  > {str(etype).ljust(20)}: {pred:.1%} (Hedef: {low:.0%} - {high:.0%}) -> {status}")
+            if pred < low: status = "📉 DÜŞÜK (Under-prediction?)"
+            if pred > high: status = "🚨 YÜKSEK (Over-prediction?)"
+            
+            logger.info(f"  > {etype.ljust(25)}: Tahmin %{pred*100:.1f} (Ref: %{low*100:.0f}-%{high*100:.0f}) -> {status}")
 
 def plot_aggregate_risk_by_type(df, logger):
+    """
+    Ekipman tiplerine göre risk yoğunluğunu gösteren Dual-Axis grafik.
+    """
     if 'PoF_Ensemble_12Ay' not in df.columns:
         return None
 
     # Agregasyon
-    agg_df = df.groupby('Ekipman_Tipi').agg(
-        Mean_PoF_1Y=('PoF_Ensemble_12Ay', 'mean'),
-        Count=('cbs_id', 'count')
-    ).reset_index()
+    # Hangi sütun adını kullanacağımızı bulalım
+    chronic_col = 'Chronic_Flag' if 'Chronic_Flag' in df.columns else 'Kronik_Flag'
     
-    # Eğer Chronic_Flag varsa onu da ekle
-    if 'Chronic_Flag' in df.columns:
-        chronic_agg = df.groupby('Ekipman_Tipi')['Chronic_Flag'].mean().reset_index()
-        agg_df = agg_df.merge(chronic_agg, on='Ekipman_Tipi')
-        
-    agg_df = agg_df[agg_df['Count'] >= 30].sort_values('Mean_PoF_1Y', ascending=False).head(10)
+    agg_dict = {'PoF_Ensemble_12Ay': 'mean', 'cbs_id': 'count'}
+    if chronic_col in df.columns:
+        agg_dict[chronic_col] = 'mean' # Kronik oranı
+
+    agg_df = df.groupby('Ekipman_Tipi').agg(agg_dict).reset_index()
+    
+    # Sütun isimlerini düzelt
+    agg_df = agg_df.rename(columns={
+        'PoF_Ensemble_12Ay': 'Mean_PoF', 
+        'cbs_id': 'Count',
+        chronic_col: 'Chronic_Rate'
+    })
+    
+    # Sadece en az 30 varlığı olan tipleri al ve en risklileri seç
+    agg_df = agg_df[agg_df['Count'] >= 30].sort_values('Mean_PoF', ascending=False).head(10)
 
     if agg_df.empty: return None
 
+    # Çift Eksenli Grafik Çizimi
     fig, ax1 = plt.subplots(figsize=(12, 6))
-    sns.barplot(x='Ekipman_Tipi', y='Mean_PoF_1Y', data=agg_df, ax=ax1, color='darkred', alpha=0.7)
-    ax1.set_ylabel('Ortalama PoF (1 Yıl)', color='darkred', fontsize=12)
-    ax1.tick_params(axis='y', labelcolor='darkred')
+    
+    # 1. Bar Chart (Arıza Olasılığı)
+    sns.barplot(x='Ekipman_Tipi', y='Mean_PoF', data=agg_df, ax=ax1, color='firebrick', alpha=0.6)
+    ax1.set_ylabel('Ortalama Arıza Olasılığı (12 Ay)', color='firebrick', fontweight='bold')
+    ax1.tick_params(axis='y', labelcolor='firebrick')
     ax1.set_xlabel('Ekipman Tipi', fontsize=12)
     ax1.tick_params(axis='x', rotation=45)
     
-    if 'Chronic_Flag' in agg_df.columns:
+    # 2. Line Chart (Kronik Oranı) - Eğer veri varsa
+    if 'Chronic_Rate' in agg_df.columns:
         ax2 = ax1.twinx()
-        sns.lineplot(x='Ekipman_Tipi', y='Chronic_Flag', data=agg_df, ax=ax2, color='darkgreen', marker='o', linewidth=3)
-        ax2.set_ylabel('Ortalama Kronik Oranı', color='darkgreen', fontsize=12)
-        ax2.tick_params(axis='y', labelcolor='darkgreen')
+        sns.lineplot(x='Ekipman_Tipi', y='Chronic_Rate', data=agg_df, ax=ax2, color='navy', marker='o', linewidth=2)
+        ax2.set_ylabel('Kronik Varlık Oranı', color='navy', fontweight='bold')
+        ax2.tick_params(axis='y', labelcolor='navy')
+        ax2.grid(False) # İkinci ızgarayı kapat ki karışmasın
     
-    plt.title('Ekipman Tipine Göre Risk Yoğunluğu (Top 10)', fontsize=14)
+    plt.title('Ekipman Tipine Göre Risk Analizi (Top 10)', fontsize=14)
+    
     path = os.path.join(VISUAL_DIR, "08_aggregate_risk_by_type.png")
     plt.savefig(path, dpi=300, bbox_inches='tight')
     plt.close()
-    logger.info(f"  > Kaydedildi: 08_aggregate_risk_by_type.png")
+    
+    logger.info(f"  📸 Karma risk grafiği kaydedildi: 08_aggregate_risk_by_type.png")
     return path
-
 # ------------------------------------------------------------------------------
 # PHASE 3: EXCEL REPORTING
 # ------------------------------------------------------------------------------
-def create_excel_report(df, crit_chronic, case_studies, logger): 
-    logger.info("="*60)
-    logger.info("[PHASE 3] Excel Raporu Oluşturuluyor...")
-    
-    timestamp = datetime.now().strftime("%Y-%m-%d")
-    out_path = os.path.join(REPORT_DIR, f"PoF3_Analiz_Raporu_Final.xlsx")
-    
-    risk_col = 'Risk_Class' if 'Risk_Class' in df.columns else 'Risk_Sinifi'
-    
-    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-        total = len(df)
-        crit_count = (df[risk_col].isin(['Critical', 'KRİTİK'])).sum() if risk_col in df.columns else 0
-        avg_health = df['Health_Score'].mean() if 'Health_Score' in df.columns else 0
-        
-        summary = pd.DataFrame({
-            'KPI': ['Toplam Varlık', 'Kritik Riskli', 'Kronik ve Kritik', 'Ortalama Sağlık', 'Rapor Tarihi'],
-            'Değer': [total, crit_count, len(crit_chronic), f"{avg_health:.1f}", timestamp]
-        })
-        summary.to_excel(writer, sheet_name='Yonetici_Ozeti', index=False)
-        
-        if not crit_chronic.empty:
-            crit_chronic.to_excel(writer, sheet_name='Acil_Mudahale', index=False)
 
-        if not case_studies.empty:
-            case_studies.to_excel(writer, sheet_name='Vaka_Analizi_CaseStudy', index=False)
-            
-        # Top 1000 Riskli
-        sort_col = 'PoF_Ensemble_12Ay' if 'PoF_Ensemble_12Ay' in df.columns else df.columns[0]
-        df.sort_values(sort_col, ascending=False).head(1000).to_excel(writer, sheet_name='Risk_Master_Top1000', index=False)
-            
-    logger.info(f"  > Kaydedildi: {os.path.basename(out_path)}")
-    
 def generate_case_studies(df_risk, logger):
+    """
+    Modelin son 6 aydaki başarısını ölçen 'Vaka Analizi' (Case Study) tablosu.
+    """
     logger.info("[PHASE 1.5] Vaka Analizleri (Case Studies) Oluşturuluyor...")
     
-    # Arıza olayları dosyasını bul (intermediate_paths)
+    # 1. Arıza Olaylarını Yükle
+    # pof.py'de oluşturulan temiz arıza listesini arıyoruz
     events_path = os.path.join(INTERMEDIATE_DIR, "fault_events_clean.csv")
     
-    if not os.path.exists(events_path):
-        # Eğer ara çıktı yoksa, ana girdi dosyasını kullanmayı dene (Fallback)
-        raw_path = os.path.join(BASE_DIR, "data", "girdiler", "ariza_final.xlsx")
-        if os.path.exists(raw_path):
-            events = pd.read_excel(raw_path)
-            # Kolon isimlerini uyarla
-            if 'started at' in events.columns: events['Ariza_Baslangic_Zamani'] = events['started at']
-            if 'cbs_id' not in events.columns and 'Ekipman Kodu' in events.columns: events['cbs_id'] = events['Ekipman Kodu']
-        else:
-            return pd.DataFrame()
-    else:
+    events = pd.DataFrame()
+    if os.path.exists(events_path):
         events = pd.read_csv(events_path)
-
-    # Tarih parse et
-    if 'Ariza_Baslangic_Zamani' in events.columns:
-        events['Ariza_Baslangic_Zamani'] = pd.to_datetime(events['Ariza_Baslangic_Zamani'], errors='coerce', dayfirst=True)
+        logger.info(f"  > Arıza verisi yüklendi: {events_path}")
     else:
+        # Ara çıktı yoksa ana ham veriyi dene (Fallback)
+        # config.yaml veya global DATA_PATHS'den yolu bulmaya çalış
+        raw_path = os.path.join(BASE_DIR, "data", "ariza_kayitlari_son.xlsx")
+        if os.path.exists(raw_path):
+            logger.warning("  ⚠️ Ara çıktı yok, ham Excel okunuyor (Yavaş olabilir)...")
+            events = pd.read_excel(raw_path)
+    
+    if events.empty:
+        logger.error("  ❌ Arıza verisi bulunamadı. Case Study atlanıyor.")
         return pd.DataFrame()
 
+    # 2. Sütun İsimlerini Standartlaştır
+    # Farklı kaynaklardan gelebileceği için isimleri eşitliyoruz
+    col_map = {
+        'started at': 'Ariza_Baslangic_Zamani',
+        'cbs_id': 'cbs_id',
+        'Ekipman Kodu': 'cbs_id' # Alternatif isim
+    }
+    events = events.rename(columns=col_map)
+    
+    if 'Ariza_Baslangic_Zamani' not in events.columns or 'cbs_id' not in events.columns:
+        logger.error("  ❌ Gerekli sütunlar (started at, cbs_id) eksik.")
+        return pd.DataFrame()
+
+    # 3. Tarih ve ID Temizliği
+    events['Ariza_Baslangic_Zamani'] = pd.to_datetime(events['Ariza_Baslangic_Zamani'], errors='coerce', dayfirst=True)
     events['cbs_id'] = events['cbs_id'].astype(str).str.lower().str.strip()
     
-    # Son 6 aydaki arızaları al
-    analysis_date = events['Ariza_Baslangic_Zamani'].max()
-    if pd.isna(analysis_date): return pd.DataFrame()
+    # 4. Son 6 Aydaki Arızaları Filtrele (Yakın Geçmiş Testi)
+    # Analiz tarihini verideki en son tarih kabul et
+    last_date = events['Ariza_Baslangic_Zamani'].max()
+    if pd.isna(last_date): return pd.DataFrame()
     
-    cutoff_date = analysis_date - timedelta(days=180)
+    cutoff_date = last_date - timedelta(days=180)
     recent_faults = events[events['Ariza_Baslangic_Zamani'] >= cutoff_date].copy()
     
     if recent_faults.empty:
+        logger.warning("  ⚠️ Son 6 ayda hiç arıza kaydı yok.")
         return pd.DataFrame()
 
-    # Risk verisiyle birleştir
+    # 5. Risk Verisi ile Birleştir (Merge)
+    # df_risk: pof.py'den gelen tahmin tablosu
     df_risk = ensure_pof_column(df_risk, logger)
-
-    # FIX: Ensure cbs_id types match before merge
     df_risk['cbs_id'] = df_risk['cbs_id'].astype(str).str.lower().str.strip()
 
-    risk_col = 'Risk_Class' if 'Risk_Class' in df_risk.columns else 'Risk_Sinifi'
+    # Hangi sütunları alacağız?
+    risk_col = 'Risk_Sinifi'
+    if 'Risk_Class' in df_risk.columns: risk_col = 'Risk_Class'
+    
     cols_to_merge = ['cbs_id', risk_col, 'PoF_Ensemble_12Ay']
-
-    # Varsa ekle
-    for c in ['Health_Score', 'Ekipman_Tipi', 'Ilce']:
+    # Opsiyonel sütunlar varsa ekle
+    for c in ['Health_Score', 'Ekipman_Tipi', 'Ilce', 'Marka']:
         if c in df_risk.columns: cols_to_merge.append(c)
 
-    case_df = recent_faults.merge(
-        df_risk[cols_to_merge],
-        on='cbs_id',
-        how='left'
-    )
+    case_df = recent_faults.merge(df_risk[cols_to_merge], on='cbs_id', how='left')
     
-    # Değerlendirme
+    # 6. Başarı Değerlendirmesi (Grading)
     def judge_prediction(row):
+        # Risk sınıfı yoksa (yeni varlık veya eşleşme hatası)
         if risk_col not in row or pd.isna(row[risk_col]): return "Bilinmeyen Varlık"
-        r = row[risk_col]
-        if r in ['Critical', 'High', 'KRİTİK', 'YÜKSEK']:
+        
+        r = str(row[risk_col]).upper()
+        # Yüksek risk dediklerimiz bozulduysa -> BAŞARI
+        if any(x in r for x in ['CRIT', 'KRİT', 'HIGH', 'YÜKSEK']):
             return "BAŞARILI (Öngörüldü)"
-        elif r in ['Medium', 'ORTA']:
+        # Orta risk dediklerimiz bozulduysa -> KISMİ
+        elif any(x in r for x in ['MED', 'ORTA']):
             return "KISMİ (İzleme)"
+        # Düşük risk dediklerimiz bozulduysa -> HATA (Kaçırıldı)
         else:
             return "KAÇIRILDI (Düşük Risk)"
 
     case_df['Model_Karari'] = case_df.apply(judge_prediction, axis=1)
     
-    # En yüksek başarılı ve en kötü kaçırılanları seç
-    successes = case_df[case_df['Model_Karari'] == "BAŞARILI (Öngörüldü)"].head(10)
-    misses = case_df[case_df['Model_Karari'] == "KAÇIRILDI (Düşük Risk)"].head(5)
+    # Rapor için örnekler seç (10 Başarılı, 5 Hatalı)
+    successes = case_df[case_df['Model_Karari'] == "BAŞARILI (Öngörüldü)"].sort_values('Ariza_Baslangic_Zamani', ascending=False).head(10)
+    misses = case_df[case_df['Model_Karari'] == "KAÇIRILDI (Düşük Risk)"].sort_values('Ariza_Baslangic_Zamani', ascending=False).head(5)
     
     final_cases = pd.concat([successes, misses])
+    logger.info(f"  ✅ Vaka analizi tamamlandı: {len(successes)} Başarılı, {len(misses)} Kaçırılan örnek seçildi.")
     
-    logger.info(f"  > {len(final_cases)} adet vaka analizi oluşturuldu.")
     return final_cases
 
 # ------------------------------------------------------------------------------
-# PHASE 4: POWERPOINT PRESENTATION
+# PHASE 3: EXCEL REPORTING (FINAL OUTPUT)
 # ------------------------------------------------------------------------------
+# =============================================================================
+# 🏆 PROOF & FINAL DELIVERY (KANIT VE NİHAİ RAPORLAMA)
+# =============================================================================
+# Bu modül, analiz döngüsünü tamamlar ve sonuçları iki kritik formatta sunar:
+#
+# 1. 🕵️‍♂️ Vaka Analizleri / Case Studies (generate_case_studies):
+#    - Modelin "Güvenilirliğini" ispatlar.
+#    - Son 6 ayda gerçekleşen arızaları, modelin geçmiş tahminleriyle kıyaslar.
+#    - Çıktı: "Model, geçen ay yanan Trafo X'i 'Kritik Risk' olarak öngörmüş müydü?"
+#      sorusunun cevabını içeren "Başarı/Hata Karnesi"dir.
+#    - Bu tablo, bütçe onayı almak için en güçlü kanıttır.
+#
+# 2. 📑 Nihai Excel Raporu (create_excel_report):
+#    - Projenin resmi teslimat dosyasıdır.
+#    - Çok sayfalı (Multi-sheet) bir yapıdadır:
+#      a. Yönetici Özeti: Tek bakışta filo sağlığı ve KPI'lar.
+#      b. Acil Müdahale: Bakım ekiplerinin pazartesi sabahı alacağı iş listesi.
+#      c. Risk Master: Tüm varlıkların detaylı risk dökümü (Top 1000).
+# =============================================================================
+def create_excel_report(df, crit_chronic, case_studies, logger): 
+    """
+    Tüm analizleri tek bir Excel dosyasında (Multi-Sheet) toplar.
+    """
+    logger.info("="*60)
+    logger.info("[PHASE 3] Excel Raporu Oluşturuluyor...")
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    out_path = os.path.join(REPORT_DIR, f"PoF3_Analiz_Raporu_Final_{timestamp}.xlsx")
+    
+    risk_col = 'Risk_Sinifi'
+    if 'Risk_Class' in df.columns: risk_col = 'Risk_Class'
+    
+    # Excel Writer Başlat
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        
+        # 1. YÖNETİCİ ÖZETİ (KPI Tablosu)
+        total = len(df)
+        crit_mask = df[risk_col].astype(str).str.contains('KRİT|CRIT', case=False, na=False)
+        crit_count = crit_mask.sum()
+        
+        avg_health = 0
+        if 'Health_Score' in df.columns: avg_health = df['Health_Score'].mean()
+        
+        summary_data = {
+            'Metrik': ['Toplam Varlık Sayısı', 'Kritik Riskli Varlık Sayısı', 
+                       'Kronik ve Kritik (Acil)', 'Filo Ortalama Sağlık Puanı', 'Rapor Tarihi'],
+            'Değer': [total, crit_count, len(crit_chronic), f"{avg_health:.1f} / 100", timestamp]
+        }
+        pd.DataFrame(summary_data).to_excel(writer, sheet_name='Yonetici_Ozeti', index=False)
+        
+        # 2. ACİL MÜDAHALE LİSTESİ
+        if not crit_chronic.empty:
+            crit_chronic.to_excel(writer, sheet_name='Acil_Mudahale_Listesi', index=False)
+
+        # 3. VAKA ANALİZLERİ (Kanıt)
+        if not case_studies.empty:
+            # Sadece önemli sütunları al
+            cols = ['cbs_id', 'Ariza_Baslangic_Zamani', 'Ekipman_Tipi', 'Ilce', 
+                    'Model_Karari', risk_col, 'PoF_Ensemble_12Ay']
+            cols = [c for c in cols if c in case_studies.columns]
+            case_studies[cols].to_excel(writer, sheet_name='Model_Dogrulama_Vakalari', index=False)
+            
+        # 4. RİSK MASTER (TOP 1000)
+        # Tüm filoyu basmak yerine en riskli 1000 varlığı basar (Dosya boyutu için)
+        sort_col = 'PoF_Ensemble_12Ay'
+        ascending = False # En yüksek PoF en üstte
+        
+        if sort_col not in df.columns:
+            if 'Health_Score' in df.columns:
+                sort_col = 'Health_Score'
+                ascending = True # En düşük sağlık puanı en üstte
+            else:
+                sort_col = df.columns[0] # Fallback
+
+        df.sort_values(sort_col, ascending=ascending).head(1000).to_excel(writer, sheet_name='Risk_Master_Top1000', index=False)
+            
+    logger.info(f"  💾 Excel Raporu Kaydedildi: {os.path.basename(out_path)}")
+    return out_path
+
+# ------------------------------------------------------------------------------
+# PHASE 4: POWERPOINT PRESENTATION (YÖNETİCİ SUNUMU)
+# ------------------------------------------------------------------------------
+# =============================================================================
+# 📽️ EXECUTIVE PRESENTATION (OTOMATİK SUNUM)
+# =============================================================================
+# Bu fonksiyon, teknik analiz sonuçlarını "Yönetim Kurulu" formatına çevirir.
+#
+# 🎯 Özellikleri:
+#    - Python-PPTX kütüphanesini kullanır.
+#    - Dinamik Özet: Raporun alındığı günkü sayıları (Kritik, Kronik vb.)
+#      slaytların içine metin olarak yazar.
+#    - Görsel Galeri: VISUAL_DIR altında üretilen tüm grafikleri
+#      otomatik olarak yeni slaytlara yerleştirir.
+#
+# ⚠️ Gereksinim:
+#    - 'pip install python-pptx' kurulu olmalıdır.
+#    - Kurulu değilse fonksiyon sessizce çalışmayı durdurur (Crash olmaz).
+# =============================================================================
 def create_pptx_presentation(df, charts, logger):
+    """
+    Analiz sonuçlarını ve grafikleri (Gelişmiş Analitikler dahil) PowerPoint sunumuna dönüştürür.
+    """
     if not HAS_PPTX:
+        logger.warning("  ⚠️ python-pptx kütüphanesi yüklü değil. PPTX oluşturulamadı.")
         return
 
     logger.info("="*60)
     logger.info("[PHASE 4] PowerPoint Sunumu Oluşturuluyor...")
     
-    prs = Presentation()
-    timestamp = datetime.now().strftime("%d %B %Y")
+    try:
+        prs = Presentation()
+    except Exception as e:
+        logger.error(f"  ❌ PPTX başlatılamadı: {e}")
+        return
+
+    timestamp = datetime.now().strftime("%d.%m.%Y")
     
-    # Slide 1: Başlık
-    slide = prs.slides.add_slide(prs.slide_layouts[0])
-    slide.shapes.title.text = "PoF3 Risk ve Sağlık Analizi"
-    slide.placeholders[1].text = f"Yönetici Özeti Raporu\n{timestamp}"
+    # --- SLIDE 1: KAPAK ---
+    slide = prs.slides.add_slide(prs.slide_layouts[0]) # Title Slide
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
     
-    # Slide 2: Özet
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    title.text = "Varlık Sağlığı ve Risk Analizi (PoF)"
+    subtitle.text = f"Yönetici Özeti Raporu\nRapor Tarihi: {timestamp}\nOluşturan: AI Risk Engine"
+    
+    # --- SLIDE 2: YÖNETİCİ ÖZETİ (METİN) ---
+    slide = prs.slides.add_slide(prs.slide_layouts[1]) # Title and Content
     slide.shapes.title.text = "Genel Durum Özeti"
     
+    # İstatistikleri Hesapla
     total = len(df)
-    risk_col = 'Risk_Class' if 'Risk_Class' in df.columns else 'Risk_Sinifi'
-    crit = (df[risk_col].isin(['Critical', 'KRİTİK'])).sum() if risk_col in df.columns else 0
-    chronic = (df['Chronic_Flag'] == 1).sum() if 'Chronic_Flag' in df.columns else 0
     
-    content = f"""
-    Toplam Varlık Sayısı: {total:,}
-    Kritik Riskli Varlıklar: {crit:,}
-    Kronik Sorunlu Varlıklar: {chronic:,}
+    risk_col = 'Risk_Sinifi'
+    if 'Risk_Class' in df.columns: risk_col = 'Risk_Class'
     
-    Veri Seti: Arıza Bakım Yönetim Sistemi
-    Analiz Tarihi: {timestamp}
-    """
-    slide.placeholders[1].text = content
+    crit_count = 0
+    if risk_col in df.columns:
+        crit_count = df[risk_col].astype(str).str.upper().str.contains('KRİT|CRIT').sum()
+        
+    chronic_count = 0
+    chronic_col = 'Chronic_Flag' if 'Chronic_Flag' in df.columns else 'Kronik_Flag'
+    if chronic_col in df.columns:
+        chronic_count = (df[chronic_col] == 1).sum()
+        
+    avg_health = df['Health_Score'].mean() if 'Health_Score' in df.columns else 0
 
-    # Grafikler
-    chart_slides = {
-        'health_dist': "Varlık Sağlık Dağılımı",
-        'chronic_dist': "Kronik Varlık Analizi",
-        'aggregate_risk': "Ekipman Tipine Göre Risk",
-        'geo_map': "Coğrafi Risk Haritası"
+    # Metin İçeriği
+    tf = slide.placeholders[1].text_frame
+    tf.text = f"Analiz Kapsamı: {total:,} Adet Şebeke Varlığı"
+    
+    p = tf.add_paragraph()
+    p.text = f"🚨 Kritik Riskli Varlıklar: {crit_count:,} adet (%{100*crit_count/total:.1f})"
+    p.level = 1
+    
+    p = tf.add_paragraph()
+    p.text = f"🏚️ Kronik Sorunlu Varlıklar: {chronic_count:,} adet"
+    p.level = 1
+    
+    p = tf.add_paragraph()
+    p.text = f"❤️ Filo Ortalama Sağlık Puanı: {avg_health:.1f} / 100"
+    p.level = 1
+
+    p = tf.add_paragraph()
+    p.text = "Öneri: 'Acil Müdahale Listesi'ndeki varlıklar için iş emri oluşturulmalıdır."
+    p.level = 2
+
+    # --- SLIDE 3-X: GRAFİKLER ---
+    # Aggregate Risk grafiği charts sözlüğünde olmayabilir, manuel kontrol ekliyoruz.
+    agg_path = os.path.join(VISUAL_DIR, "08_aggregate_risk_by_type.png")
+    if os.path.exists(agg_path) and 'aggregate_risk' not in charts:
+        charts['aggregate_risk'] = agg_path
+
+    # GÜNCELLENMİŞ HARİTA: Yeni grafikleri buraya ekledik
+    slide_mapping = {
+        'health_dist': "Filonun Sağlık Skoru Dağılımı",
+        'geo_map': "Coğrafi Risk Yoğunluk Haritası",
+        'aggregate_risk': "Ekipman Tipine Göre Risk Analizi",
+        'chronic_dist': "Kronik Varlık İstatistikleri",
+        
+        # --- YENİ EKLENENLER (Advanced Diagnostics) ---
+        'drivers': "Risk Faktörleri (Drivers) Analizi",
+        'operational': "Operasyonel Durum Paneli",
+        'survival': "Varlık Ömür Eğrileri (Survival Curves)",
+        'health_dash': "Detaylı Sağlık Analizi Dashboard"
     }
     
-    for key, title in chart_slides.items():
-        if key in charts and os.path.exists(charts[key]):
-            slide = prs.slides.add_slide(prs.slide_layouts[5])
-            slide.shapes.title.text = title
-            slide.shapes.add_picture(charts[key], Inches(1), Inches(1.5), height=Inches(5.5))
+    for key, title_text in slide_mapping.items():
+        # Grafik sözlükte var mı VE dosya diskte mevcut mu?
+        if key in charts and charts[key] and os.path.exists(charts[key]):
+            slide = prs.slides.add_slide(prs.slide_layouts[5]) # Title Only (Resim için boş alan)
+            slide.shapes.title.text = title_text
             
-    out_path = os.path.join(OUTPUT_DIR, "PoF3_Yonetici_Sunumu_Final.pptx")
-    prs.save(out_path)
-    logger.info(f"  > Kaydedildi: {os.path.basename(out_path)}")
+            # Resmi Ortala ve Yerleştir
+            img_path = charts[key]
+            
+            left = Inches(0.5) # Biraz daha sola yanaşık
+            top = Inches(1.5)
+            height = Inches(5.5) 
+            
+            try:
+                slide.shapes.add_picture(img_path, left, top, height=height)
+            except Exception as img_err:
+                logger.warning(f"  ⚠️ Resim eklenirken hata ({key}): {img_err}")
 
+    # Kaydet
+    out_path = os.path.join(OUTPUT_DIR, f"PoF3_Yonetici_Sunumu_{timestamp}.pptx")
+    try:
+        prs.save(out_path)
+        logger.info(f"  💾 Sunum Kaydedildi: {os.path.basename(out_path)}")
+    except Exception as e:
+        logger.error(f"  ❌ Sunum dosyası kaydedilemedi (Dosya açık olabilir mi?): {e}")
 # ------------------------------------------------------------------------------
-# MAIN
+# MAIN ORCHESTRATION
 # ------------------------------------------------------------------------------
+# =============================================================================
+# 🚀 MAIN PIPELINE ORCHESTRATION (ANA YÖNETİM MERKEZİ)
+# =============================================================================
+# Bu fonksiyon, ham veriden nihai raporlara giden uçtan uca (End-to-End) akışı yönetir.
+#
+# 🔄 İşlem Adımları (Process Flow):
+#
+# 1. 📥 Data Ingestion (Yükleme):
+#    - Arıza ve Sağlam ekipman verileri okunur, tarihler parse edilir.
+#    - Veri setinin zaman aralığı (Start/End Date) otomatik belirlenir.
+#
+# 2. 🏗️ Dataset Construction (Veri İnşası):
+#    - 'build_equipment_master': Tüm varlıkların tekil listesi çıkarılır.
+#    - 'add_survival_columns': Sol Kesilme (Left Truncation) ve Ömür (Duration) hesaplanır.
+#    - 'Chronic & Temporal': Arıza geçmişine dayalı dinamik özellikler türetilir.
+#
+# 3. 🛡️ Global Modeling (Güvenlik Ağı):
+#    - Veri seti küçük olan ekipman tipleri (örn. "Ayırıcı") için tek başına model
+#      eğitmek risklidir (Overfitting).
+#    - Bu adımda tüm veriyi kullanan "Global Modeller" (Cox, RSF, ML) eğitilir.
+#
+# 4. ⚙️ Stratified Training (Katmanlı Eğitim):
+#    - Her ekipman tipi (Trafo, Kesici vb.) için döngüye girilir.
+#    - Karar Mekanizması:
+#      a. Yeterli Veri Var mı? (N > 50, Events > 10) -> O tipe ÖZEL model eğit.
+#      b. Veri Yetersiz mi? -> GLOBAL modelleri kullan (Fallback).
+#
+# 5. 🏥 Risk Scoring (Puanlama):
+#    - Modellerin ürettiği olasılıklar (PoF), 0-100 arası "Sağlık Skoru"na çevrilir.
+#    - Kritik ve Kronik varlıklar etiketlenir.
+#
+# 6. 🕰️ Backtesting (Doğrulama):
+#    - Modelin başarısını ölçmek için geçmişe dönük (2022-2024) simülasyon yapılır.
+# =============================================================================
 def main():
     logger = setup_logger()
     logger.info("🚀 PoF3 Raporlama Motoru Başlatılıyor...")
     
     # 1. Dosya Kontrolü ve Yükleme
+    # pof.py çıktısını arıyoruz
     risk_path = os.path.join(OUTPUT_DIR, "pof_predictions_final.csv")
     
     if not os.path.exists(risk_path):
-        # Fallback: Eski isimle dene
+        # Fallback: Farklı isimlendirme ihtimaline karşı
         alt_path = os.path.join(OUTPUT_DIR, "risk_equipment_master.csv")
         if os.path.exists(alt_path):
             risk_path = alt_path
         else:
             logger.error(f"[FATAL] Sonuç dosyası bulunamadı: {risk_path}")
-            logger.error("Lütfen önce 'pof.py' (Step 04) çalıştırın.")
+            logger.error("Lütfen önce 'pof.py' (Analiz Motoru) çalıştırın.")
             return
         
     df = pd.read_csv(risk_path)
+    logger.info(f"[LOAD] Risk sonuçları yüklendi: {len(df):,} kayıt")
     
-    # 2. Kolon Eşleştirme (Risk_Sinifi -> Risk_Class)
+    # 2. Veri Temizliği ve Standartlaştırma
+    # ID'leri string yap (Merge hatasını önler)
+    df['cbs_id'] = df['cbs_id'].astype(str).str.lower().str.strip()
+
+    # Kolon Eşleştirme (Risk_Sinifi -> Risk_Class)
     if 'Risk_Sinifi' in df.columns and 'Risk_Class' not in df.columns:
-        logger.info("[MAPPING] 'Risk_Sinifi' -> 'Risk_Class' eşleştirmesi yapılıyor.")
         df['Risk_Class'] = df['Risk_Sinifi']
     elif 'Risk_Class' not in df.columns:
         logger.warning("[WARN] Risk kolonu yok. Varsayılan 'Low' atanıyor.")
         df['Risk_Class'] = 'Low'
 
-    # 3. PoF Kolonunu Garantiye Al
+    # PoF Kolonunu Garantiye Al (Eksikse hesapla)
     df = ensure_pof_column(df, logger)
     
-    # 4. Master Veri ile Zenginleştirme (Lokasyon vb.)
+    # 3. Master Veri ile Zenginleştirme (Lokasyon vb.)
+    # Analiz sırasında bazı sütunlar kaybolmuş olabilir, ana kaynaktan tamamlıyoruz.
     master_path = os.path.join(INTERMEDIATE_DIR, "equipment_master.csv")
+    
     if os.path.exists(master_path):
         meta = pd.read_csv(master_path)
-        # ID normalizasyonu
         meta['cbs_id'] = meta['cbs_id'].astype(str).str.lower().str.strip()
-        df['cbs_id'] = df['cbs_id'].astype(str).str.lower().str.strip()
         
-        desired = ['Latitude', 'Longitude', 'Musteri_Sayisi', 'Ilce', 'Sehir', 'Mahalle', 'Ekipman_Tipi']
+        # Hangi sütunları geri istiyoruz?
+        desired = ['Latitude', 'Longitude', 'Musteri_Sayisi', 'Ilce', 'Sehir', 'Mahalle', 'Ekipman_Tipi', 'Marka']
         add = [c for c in desired if c in meta.columns and c not in df.columns]
         
         if add:
-            logger.info(f"[MERGE] Ek bağlam kolonları ekleniyor: {add}")
+            logger.info(f"[MERGE] Eksik bağlam kolonları ekleniyor: {add}")
             df = df.merge(meta[['cbs_id'] + add], on='cbs_id', how='left')
+    else:
+        logger.warning("[WARN] equipment_master.csv bulunamadı. Lokasyon verileri eksik olabilir.")
     
-    # Eksik metin verilerini doldur
-    for col in ['Ilce', 'Sehir', 'Ekipman_Tipi']:
-        if col not in df.columns: df[col] = 'Unknown'
-        else: df[col] = df[col].fillna('Unknown')
+    # Eksik metin verilerini doldur (Görselleştirme hatasını önler)
+    for col in ['Ilce', 'Sehir', 'Ekipman_Tipi', 'Marka']:
+        if col not in df.columns: df[col] = 'Bilinmiyor'
+        else: df[col] = df[col].fillna('Bilinmiyor')
 
-    logger.info(f"[LOAD] Raporlanacak Varlık Sayısı: {len(df):,}")
+    # 4. Validasyon ve Üretim
     validate_base_rates(df, logger)
     
+    # A) Aksiyon Listeleri
+    crit_chronic = generate_action_lists(df, logger)
+    
+    # B) Vaka Analizleri
+    case_studies = generate_case_studies(df, logger)
+    
+    # C) Görseller
+    charts = generate_visuals(df, logger)
+    
+    # D) Özel Grafikler
+    agg_path = plot_aggregate_risk_by_type(df, logger)
+    if agg_path: charts['aggregate_risk'] = agg_path 
+    # ... (Mevcut main fonksiyonunun son kısımları) ...
+
     # 5. Raporları Üret
     crit_chronic = generate_action_lists(df, logger)
     case_studies = generate_case_studies(df, logger)
     charts = generate_visuals(df, logger)
     
+    # --- YENİ EKLENEN GELİŞMİŞ GÖRSELLER ---
+    # Bu veriler 'intermediate' klasöründeki dosyalardan okunacak
+    
+    # A) Model Girdisi (Drivers ve Survival için lazım)
+    model_data_path = os.path.join(INTERMEDIATE_DIR, "model_input_data_full.csv")
+    if os.path.exists(model_data_path):
+        df_model = pd.read_csv(model_data_path)
+        
+        # Drivers
+        p1 = plot_risk_drivers(df_model, logger)
+        if p1: charts['drivers'] = p1
+        
+        # Survival Curves
+        p3 = plot_survival_curves(df_model, logger)
+        if p3: charts['survival'] = p3
+    
+    # B) Operasyonel Dashboard
+    p2 = plot_operational_dashboard(logger)
+    if p2: charts['operational'] = p2
+    
+    # C) Sağlık Dashboard
+    p4 = plot_health_dashboard(df, logger)
+    if p4: charts['health_dash'] = p4
+    # ---------------------------------------
+
     agg_path = plot_aggregate_risk_by_type(df, logger)
     if agg_path: charts['aggregate_risk'] = agg_path 
     
+    # 5. Raporlama
     create_excel_report(df, crit_chronic, case_studies, logger)
     create_pptx_presentation(df, charts, logger)
     
     logger.info("")
-    logger.info("[SUCCESS] Raporlama ve Görselleştirme Tamamlandı.")
+    logger.info("="*60)
+    logger.info("[SUCCESS] Tüm Raporlama Süreci Başarıyla Tamamlandı.")
+    logger.info(f"📂 Çıktı Klasörü: {OUTPUT_DIR}")
+    logger.info("="*60)
 
 if __name__ == "__main__":
     main()
