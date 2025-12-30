@@ -61,6 +61,45 @@ sns.set_palette("husl")
 #      alarak eksik sütunu "imal eder". Böylece raporlama çökmez.
 # =============================================================================
 # ------------------------------------------------------------------------------
+# DATE PARSING (KARMA FORMAT DESTEĞİ)
+# ------------------------------------------------------------------------------
+def parse_mixed_dates(date_str):
+    """
+    Karma tarih formatlarını TR standartına (GÜN-AY-YIL) uygun parse eder.
+    Desteklenen formatlar:
+    - DD-MM-YYYY HH:MM:SS (22-06-2025 04:59:21)
+    - YYYY-MM-DD HH:MM:SS (2023-01-17 17:14:42)
+    - DD-MM-YYYY (05-03-2025)
+    """
+    if pd.isna(date_str):
+        return pd.NaT
+
+    # String'e çevir (sayı olarak gelebilir)
+    date_str = str(date_str).strip()
+
+    # Deneme sırası (TR formatı öncelikli)
+    formats = [
+        '%d-%m-%Y %H:%M:%S',  # 22-06-2025 04:59:21
+        '%d-%m-%Y',           # 05-03-2025
+        '%Y-%m-%d %H:%M:%S',  # 2023-01-17 17:14:42
+        '%Y-%m-%d',           # 2023-01-17
+        '%d.%m.%Y %H:%M:%S',  # 22.06.2025 04:59:21 (Noktalı)
+        '%d.%m.%Y',           # 22.06.2025
+    ]
+
+    for fmt in formats:
+        try:
+            return pd.to_datetime(date_str, format=fmt)
+        except:
+            continue
+
+    # Hiçbiri işe yaramazsa pandas otomatik (dayfirst=True)
+    try:
+        return pd.to_datetime(date_str, dayfirst=True)
+    except:
+        return pd.NaT
+
+# ------------------------------------------------------------------------------
 # LOGGING
 # ------------------------------------------------------------------------------
 def setup_logger():
@@ -300,8 +339,12 @@ def plot_operational_dashboard(logger):
     if not os.path.exists(path): return None
     
     df = pd.read_csv(path)
-    df['started at'] = pd.to_datetime(df['started at'])
-    
+    df['started at'] = df['started at'].apply(parse_mixed_dates)
+
+    # Gelecek tarihli kayıtları filtrele
+    today = pd.Timestamp.now()
+    df = df[df['started at'] <= today]
+
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
     fig.suptitle('Operasyonel Durum Paneli', fontsize=24)
     
@@ -598,7 +641,6 @@ def generate_case_studies(df_risk, logger):
     logger.info("[PHASE 1.5] Vaka Analizleri (Case Studies) Oluşturuluyor...")
     
     # 1. Arıza Olaylarını Yükle
-    # pof.py'de oluşturulan temiz arıza listesini arıyoruz
     events_path = os.path.join(INTERMEDIATE_DIR, "fault_events_clean.csv")
     
     events = pd.DataFrame()
@@ -606,11 +648,9 @@ def generate_case_studies(df_risk, logger):
         events = pd.read_csv(events_path)
         logger.info(f"  > Arıza verisi yüklendi: {events_path}")
     else:
-        # Ara çıktı yoksa ana ham veriyi dene (Fallback)
-        # config.yaml veya global DATA_PATHS'den yolu bulmaya çalış
-        raw_path = os.path.join(BASE_DIR, "data", "ariza_kayitlari_son.xlsx")
+        raw_path = os.path.join(BASE_DIR, "data", "girdiler", "ariza_final.xlsx")
         if os.path.exists(raw_path):
-            logger.warning("  ⚠️ Ara çıktı yok, ham Excel okunuyor (Yavaş olabilir)...")
+            logger.warning("  ⚠️ Ara çıktı yok, ham Excel okunuyor...")
             events = pd.read_excel(raw_path)
     
     if events.empty:
@@ -618,11 +658,10 @@ def generate_case_studies(df_risk, logger):
         return pd.DataFrame()
 
     # 2. Sütun İsimlerini Standartlaştır
-    # Farklı kaynaklardan gelebileceği için isimleri eşitliyoruz
     col_map = {
         'started at': 'Ariza_Baslangic_Zamani',
         'cbs_id': 'cbs_id',
-        'Ekipman Kodu': 'cbs_id' # Alternatif isim
+        'Ekipman Kodu': 'cbs_id'
     }
     events = events.rename(columns=col_map)
     
@@ -631,60 +670,78 @@ def generate_case_studies(df_risk, logger):
         return pd.DataFrame()
 
     # 3. Tarih ve ID Temizliği
-    events['Ariza_Baslangic_Zamani'] = pd.to_datetime(events['Ariza_Baslangic_Zamani'], errors='coerce', dayfirst=True)
+    # parse_mixed_dates fonksiyonunun import edildiğinden emin olun, yoksa pd.to_datetime kullanın
+    try:
+        events['Ariza_Baslangic_Zamani'] = events['Ariza_Baslangic_Zamani'].apply(parse_mixed_dates)
+    except NameError:
+        events['Ariza_Baslangic_Zamani'] = pd.to_datetime(events['Ariza_Baslangic_Zamani'], errors='coerce')
+
     events['cbs_id'] = events['cbs_id'].astype(str).str.lower().str.strip()
-    
-    # 4. Son 6 Aydaki Arızaları Filtrele (Yakın Geçmiş Testi)
-    # Analiz tarihini verideki en son tarih kabul et
+
+    # 3.5. Gelecek Tarihli Kayıtları Filtrele
+    today = pd.Timestamp.now()
+    future_count = (events['Ariza_Baslangic_Zamani'] > today).sum()
+    if future_count > 0:
+        logger.warning(f"  ⚠️ {future_count} gelecek tarihli kayıt bulundu ve filtrelendi.")
+        events = events[events['Ariza_Baslangic_Zamani'] <= today]
+
+    # 4. Son 6 Aydaki Arızaları Filtrele
     last_date = events['Ariza_Baslangic_Zamani'].max()
     if pd.isna(last_date): return pd.DataFrame()
     
     cutoff_date = last_date - timedelta(days=180)
+    
+    # [DÜZELTME BURADA] - Değişken ismi tutarlılığı sağlandı
     recent_faults = events[events['Ariza_Baslangic_Zamani'] >= cutoff_date].copy()
     
+    # Sadece gerekli sütunları al, böylece 'Ekipman_Tipi' gibi sütunlar buradan silinir
+    # ve merge işleminde çakışma (duplicate column) yaratmaz.
+    keep_cols = ['cbs_id', 'Ariza_Baslangic_Zamani', 'cause code', 'Ariza_Nedeni']
+    recent_faults = recent_faults[[c for c in keep_cols if c in recent_faults.columns]]
+
     if recent_faults.empty:
         logger.warning("  ⚠️ Son 6 ayda hiç arıza kaydı yok.")
         return pd.DataFrame()
 
     # 5. Risk Verisi ile Birleştir (Merge)
-    # df_risk: pof.py'den gelen tahmin tablosu
     df_risk = ensure_pof_column(df_risk, logger)
     df_risk['cbs_id'] = df_risk['cbs_id'].astype(str).str.lower().str.strip()
 
-    # Hangi sütunları alacağız?
     risk_col = 'Risk_Sinifi'
     if 'Risk_Class' in df_risk.columns: risk_col = 'Risk_Class'
     
-    cols_to_merge = ['cbs_id', risk_col, 'PoF_Ensemble_12Ay']
-    # Opsiyonel sütunlar varsa ekle
-    for c in ['Health_Score', 'Ekipman_Tipi', 'Ilce', 'Marka']:
-        if c in df_risk.columns: cols_to_merge.append(c)
+    # Ekipman_Tipi burada ekleniyor (df_risk'ten geliyor)
+    cols_to_merge = ['cbs_id', risk_col, 'PoF_Ensemble_12Ay', 'Health_Score', 'Ekipman_Tipi', 'Ilce', 'Marka']
+    cols_to_merge = [c for c in cols_to_merge if c in df_risk.columns]
 
+    # [DÜZELTME] merge işleminde temizlenmiş 'recent_faults' kullanılıyor
     case_df = recent_faults.merge(df_risk[cols_to_merge], on='cbs_id', how='left')
     
-    # 6. Başarı Değerlendirmesi (Grading)
+    # 6. Başarı Değerlendirmesi
     def judge_prediction(row):
-        # Risk sınıfı yoksa (yeni varlık veya eşleşme hatası)
         if risk_col not in row or pd.isna(row[risk_col]): return "Bilinmeyen Varlık"
         
         r = str(row[risk_col]).upper()
-        # Yüksek risk dediklerimiz bozulduysa -> BAŞARI
         if any(x in r for x in ['CRIT', 'KRİT', 'HIGH', 'YÜKSEK']):
             return "BAŞARILI (Öngörüldü)"
-        # Orta risk dediklerimiz bozulduysa -> KISMİ
         elif any(x in r for x in ['MED', 'ORTA']):
             return "KISMİ (İzleme)"
-        # Düşük risk dediklerimiz bozulduysa -> HATA (Kaçırıldı)
         else:
             return "KAÇIRILDI (Düşük Risk)"
 
     case_df['Model_Karari'] = case_df.apply(judge_prediction, axis=1)
     
-    # Rapor için örnekler seç (10 Başarılı, 5 Hatalı)
+    # Rapor için Seçim
     successes = case_df[case_df['Model_Karari'] == "BAŞARILI (Öngörüldü)"].sort_values('Ariza_Baslangic_Zamani', ascending=False).head(10)
     misses = case_df[case_df['Model_Karari'] == "KAÇIRILDI (Düşük Risk)"].sort_values('Ariza_Baslangic_Zamani', ascending=False).head(5)
     
     final_cases = pd.concat([successes, misses])
+    
+    # Sütun Sıralaması (Görsel Güzellik İçin)
+    display_order = ['cbs_id', 'Ekipman_Tipi', 'Ariza_Baslangic_Zamani', 'Ilce', 'Model_Karari', risk_col, 'PoF_Ensemble_12Ay']
+    final_cols = [c for c in display_order if c in final_cases.columns]
+    final_cases = final_cases[final_cols]
+
     logger.info(f"  ✅ Vaka analizi tamamlandı: {len(successes)} Başarılı, {len(misses)} Kaçırılan örnek seçildi.")
     
     return final_cases

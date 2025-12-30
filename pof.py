@@ -171,6 +171,19 @@ REAL_FAILURE_CODES = [
     "Planlı Kesinti Müdahale",      # 16 records
     "Direk Değişimi",               # 42 + 6 records - Pole replacement
     "Şebeke Bakım Çalışması",       # 1 record
+    "AG Direk Değişimi",
+    "Plansız Kesinti / Müdahale",
+    "Plansız Kesinti Müdahale",
+    "Atlama Kopuğu",
+    "AG Branşman Yeraltı Kablo Arızası",
+    "AG Havai Branşman Arızası",
+    "AG Box / Sdk Abone Çıkış Sigorta Atığı",
+    "İç Tesisat",
+    "OG Direk Yıkılması",
+    "Enerji kesintisi yapılmamıştır",
+    "Yeraltı Kablo Arızası",
+    "OG Hatta Yabancı Cisim",
+    "Sehim Bozukluğu ve İletken Dolaşıklığı"
     
 ]
 
@@ -286,24 +299,50 @@ def ensure_dirs():
         os.makedirs(os.path.dirname(p), exist_ok=True)
 
 def parse_date_safely(x):
+    """
+    Karma tarih formatlarını güvenli şekilde parse eder.
+    Desteklenen formatlar:
+    - Excel seri numarası (44567.5)
+    - DD-MM-YYYY / DD.MM.YYYY (TR format)
+    - YYYY-MM-DD (ISO format)
+    - Datetime objesi (zaten işlenmiş)
+    """
     if pd.isna(x) or str(x).strip() == "":
         return pd.NaT
-    
+
     try:
         # Eğer veri zaten datetime objesi ise (Excel okurken bazen otomatik çevirir)
         if isinstance(x, (pd.Timestamp, datetime)):
             return x
-            
+
         # Eğer veri Excel seri numarası (float/int) olarak geldiyse (Örn: 44567.5)
         if isinstance(x, (int, float)):
             # Excel başlangıç tarihi: 30 Aralık 1899
             return pd.to_datetime(x, unit='D', origin='1899-12-30')
 
-        # Standart String Çevirimi (Sizin mevcut yönteminiz)
+        # String formatları (Karma format desteği)
+        date_str = str(x).strip()
+
+        # Deneme sırası (TR formatı öncelikli)
+        formats = [
+            '%d-%m-%Y %H:%M:%S',  # 22-06-2025 04:59:21
+            '%d-%m-%Y',           # 05-03-2025
+            '%d.%m.%Y %H:%M:%S',  # 22.06.2025 04:59:21
+            '%d.%m.%Y',           # 22.06.2025
+            '%Y-%m-%d %H:%M:%S',  # 2023-01-17 17:14:42
+            '%Y-%m-%d',           # 2023-01-17
+        ]
+
+        for fmt in formats:
+            try:
+                return pd.to_datetime(date_str, format=fmt)
+            except:
+                continue
+
+        # Hiçbiri işe yaramazsa pandas otomatik (dayfirst=True)
         return pd.to_datetime(x, errors="coerce", dayfirst=True)
-        
-    except Exception as e:
-        # Hata durumunda loglamak iyi olabilir ama şimdilik NaT dönüyoruz
+
+    except Exception:
         return pd.NaT
 
 def clean_equipment_type(series: pd.Series) -> pd.Series:
@@ -340,6 +379,12 @@ def convert_duration_minutes(series: pd.Series, logger: logging.Logger) -> pd.Se
 #    - Fonksiyon, veri setini kopyalamak yerine, orijinal DataFrame'in 
 #      İNDEKS ETİKETLERİNİ (Index Labels) döndürür.
 #    - Bu yöntem, pandas sıralama işlemlerinde kayan indeks hatalarını (Loc vs Iloc) önler.
+
+# 🌟 AKILLI KESME (SMART CUTOFF):
+#    - Standart bölme sonucu Test setinde yeterli arıza (Event) kalmazsa,
+#      fonksiyon otomatik olarak kesme noktasını 6 ay geriye çeker.
+#    - Amaç: Test setinin "tamamen sağlıklı" varlıklardan oluşmasını engelleyip
+#      AUC skorunun hesaplanabilir olmasını sağlamaktır.
 # =============================================================================
 # =============================================================================
 # TEMPORAL SPLIT (Core of Leakage Prevention)
@@ -480,6 +525,13 @@ def load_fault_data(logger: logging.Logger) -> pd.DataFrame:
     df["ended at"] = df["ended at"].apply(parse_date_safely)
     df["Süre_Dakika"] = convert_duration_minutes(df["Süre_Ham"], logger)
     df["Ekipman_Tipi"] = clean_equipment_type(df["Ekipman_Tipi"])
+
+    # Filter future dates (data quality check)
+    today = pd.Timestamp.now()
+    future_faults = (df["started at"] > today).sum()
+    if future_faults > 0:
+        logger.warning(f"[DATA QUALITY] {future_faults} gelecek tarihli arıza kaydı bulundu ve filtrelendi.")
+        df = df[df["started at"] <= today].copy()
 
     # Filter invalid records
     original = len(df)
@@ -1846,27 +1898,24 @@ class TemporalBacktester:
 #    - Eğer 'CalcAge' veya 'Durat' %90'ın altındaysa, model ÇALIŞMAZ veya hatalı çalışır.
 #    - Eğer 'Lat/Long' düşükse sadece haritalar etkilenir, model çalışmaya devam eder.
 # =============================================================================
-def get_equipment_stats(df: pd.DataFrame, logger: logging.Logger) -> dict:
+def get_equipment_stats(df: pd.DataFrame, equipment_master: pd.DataFrame, logger: logging.Logger) -> dict:
     """
     Final Audit: Checks Raw Data, Location, and Engineered Features completely.
     Returns dictionary with counts AND percentages.
+    
+    ✅ DÜZELTME: has_marka ve has_bakim eklendi
     """
     stats = {}
     
     # 1. DENETİM HARİTASI
     audit_map = {
-        # --- Yapısal Veriler ---
         "Marka": "Marka",
         "Latitude": "Lat",
         "Longitude": "Long",
         "Gerilim_Seviyesi": "Volt",
         "Bakim_Sayisi": "Maint",
-        
-        # --- Yaşam Verileri ---
         "duration_days": "Durat",
         "entry_days": "Entry",
-        
-        # --- Mühendislik Özellikleri ---
         "Tref_Yas_Gun": "CalcAge",
         "MTBF_Bayes_Gun": "MTBF",
         "Observation_Ratio": "ObsRate"
@@ -1885,22 +1934,38 @@ def get_equipment_stats(df: pd.DataFrame, logger: logging.Logger) -> dict:
         df_eq = df[df["Ekipman_Tipi"] == eq_type]
         n_total = len(df_eq)
         
-        if n_total == 0: continue
+        if n_total == 0: 
+            continue
 
-        # --- DÜZELTME BURADA: Sözlüğü Önce Temel Verilerle Başlatıyoruz ---
-        # Sizin sorduğunuz kısım buraya geri geldi:
+        # Temel metrikler
+        n_events = int(df_eq["event"].sum())
+        event_rate = float(df_eq["event"].mean())
+        
+        # ✅ MARKA sayısı (absolute count)
+        has_marka = 0
+        if "Marka" in df_eq.columns:
+            has_marka = int(df_eq["Marka"].notna().sum())
+
+        # ✅ BAKIM sayısı (absolute count)
+        has_bakim = 0
+        if "Bakim_Sayisi" in df_eq.columns:
+            # Not null AND not zero (gerçekten bakım yapılmış)
+            has_bakim = int((df_eq["Bakim_Sayisi"].notna() & (df_eq["Bakim_Sayisi"] > 0)).sum())
+
         type_stats = {
             "n_total": n_total,
-            "n_events": int(df_eq["event"].sum()),
-            "event_rate": float(df_eq["event"].mean()),
+            "n_events": n_events,
+            "event_rate": event_rate,
+            "has_marka": has_marka,   # ✅ EKLENDİ
+            "has_bakim": has_bakim,   # ✅ EKLENDİ
         }
 
-        # Log satırını bu sözlükten başlatıyoruz
+        # Log satırı
         row_data = [
             eq_type,
-            str(type_stats["n_total"]),
-            str(type_stats["n_events"]),
-            f"{100*type_stats['event_rate']:.1f}%"
+            str(n_total),
+            str(n_events),
+            f"{100*event_rate:.1f}%"
         ]
         
         # Detaylı Sütun Kontrolleri
@@ -1911,15 +1976,17 @@ def get_equipment_stats(df: pd.DataFrame, logger: logging.Logger) -> dict:
             if col_name in df_eq.columns:
                 valid_mask = df_eq[col_name].notna()
                 
-                # Mantık Kontrolü (Sıfırdan büyük mü?)
+                # Mantık Kontrolü
                 if col_name in ["Tref_Yas_Gun", "duration_days"]:
                     valid_mask = valid_mask & (df_eq[col_name] > 0)
+                elif col_name == "Bakim_Sayisi":
+                    # Bakım için: Not null (veri var demek, 0 bile bilgidir)
+                    pass  # valid_mask zaten notna()
                 
                 valid_count = valid_mask.sum()
                 pct = 100 * valid_count / n_total
                 val_str = f"{pct:.0f}%"
             
-            # Hem listeye (log için) hem sözlüğe (return için) ekliyoruz
             row_data.append(val_str)
             type_stats[label] = pct
 
@@ -1930,6 +1997,18 @@ def get_equipment_stats(df: pd.DataFrame, logger: logging.Logger) -> dict:
         stats[eq_type] = type_stats
 
     logger.info("="*130)
+    
+    # ✅ DEBUG LOG
+    logger.info("\n[ANALYSIS ELIGIBILITY CHECK]")
+    for eq_type, stat in stats.items():
+        marka_ok = "✅" if stat['has_marka'] >= 30 else "❌"
+        bakim_ok = "✅" if stat['has_bakim'] >= 30 else "❌"
+        logger.info(
+            f"  {eq_type:<15}: "
+            f"Marka={stat['has_marka']:>4} {marka_ok} | "
+            f"Bakim={stat['has_bakim']:>4} {bakim_ok}"
+        )
+    
     return stats
 # =============================================================================
 # STEP 04: PREDICTION
@@ -2338,17 +2417,54 @@ def compute_health_score(df: pd.DataFrame, logger: logging.Logger = None) -> pd.
         # Kronikler her zaman öncelikli
         if chronic == 1:
             return "KRİTİK (KRONİK)"           
-        # Yüzdelik dilimlere göre sınıflar:
-        if score < 40: return "KRİTİK"      # En kötü %5 (Percentile > 0.95) - Filonun en çürükleri
-        if score < 70: return "YÜKSEK"      # Sonraki %15 (Percentile 0.80 - 0.95)
-        if score < 85: return "ORTA"        # Sonraki %30
-        return "DÜŞÜK"                      # En iyi %50 (Percentile < 0.50)
+        # ✅ DÜZELTME: Pareto optimal thresholds (20/80)
+        if score < 20: return "KRİTİK"   # ✅ En kötü %20 (80/20 kuralı)
+        if score < 50: return "YÜKSEK"   # ✅ Sonraki %30 (toplam %50)
+        if score < 80: return "ORTA"     # ✅ Sonraki %30 (toplam %80)
+        return "DÜŞÜK"                   # ✅ En iyi %20
     df["Risk_Sinifi"] = df.apply(assign_risk_class, axis=1)
     return df
 # =============================================================================
 # MAIN PIPELINE
 # =============================================================================
-
+# =============================================================================
+# 🚀 MAIN PIPELINE ORCHESTRATION (ANA YÖNETİM MERKEZİ)
+# =============================================================================
+# Bu fonksiyon, ham veriden nihai tahminlere giden uçtan uca (End-to-End) akışı yönetir.
+# "PoF v4.1" mimarisinin kalbidir.
+#
+# 🔄 İŞLEM AKIŞI (WORKFLOW):
+#
+# 1. 📥 Data Ingestion & Config (Yükleme):
+#    - Arıza ve Sağlam verileri yüklenir.
+#    - Gözlem başlangıç tarihi (Left Truncation) veriden otomatik tespit edilir.
+#
+# 2. 🏗️ Dataset Construction (Veri İnşası):
+#    - 'Survival Analysis' formatı kurulur (Duration, Event, Entry).
+#    - Kronik arızalar (Chronic Features) ve zamansal özellikler türetilir.
+#    - Ara dosyalar (Intermediate) kaydedilir.
+#
+# 3. 🛡️ Global Modeling (Güvenlik Ağı / Fallback):
+#    - Verisi az olan (N < 100) ekipman tipleri için model eğitilemez.
+#    - Bu adımda tüm filoyu kullanan "Genel Modeller" (Cox, RSF, ML) eğitilir ve
+#      yetersiz verili tipler için yedek (fallback) olarak hafızada tutulur.
+#
+# 4. ⚙️ Stratified Training (Katmanlı Eğitim):
+#    - Her ekipman tipi için döngüye girilir.
+#    - KARAR MEKANİZMASI:
+#      a. Yeterli Veri Var mı? -> O tipe ÖZEL model eğit (En yüksek hassasiyet).
+#      b. Veri Yetersiz mi? -> GLOBAL modelleri devreye sok (Tahminsiz bırakma).
+#    - Marka ve Bakım analizleri (varsa) bu aşamada üretilir.
+#
+# 5. 🏥 Final Scoring (Puanlama & Raporlama):
+#    - Tüm tahminler birleştirilir.
+#    - Olasılıklar (PoF) -> Sağlık Skoru (0-100) ve Risk Sınıfına dönüştürülür.
+#    - 'pof_predictions_final.csv', 'marka_analysis.csv' vb. master dosyalar kaydedilir.
+#
+# 6. 🕰️ Backtesting (Zaman Tüneli Testi):
+#    - Modelin başarısını kanıtlamak için 2022-2024 yılları simüle edilir.
+#    - Yönetim sunumu için AUC ve Top-100 isabet oranları hesaplanır.
+# =============================================================================
 
 def main():
     ensure_dirs()
@@ -2456,8 +2572,8 @@ def main():
     # -------------------------------------------------------------------------
     logger.info("\n" + "="*60)
     logger.info("STEP 4 - Equipment-Stratified Modeling")
-    logger.info("="*60 + "\n")   
-    eq_stats = get_equipment_stats(df_all, logger)
+    logger.info("="*60 + "\n")
+    eq_stats = get_equipment_stats(df_all, equipment_master, logger)
     unique_types = sorted(df_all["Ekipman_Tipi"].unique())
     
     MIN_SAMPLES = 100
@@ -2472,7 +2588,7 @@ def main():
     for eq_type in tqdm(unique_types, desc="Training Equipment Models", unit="type"):
         # 1. Filter Data
         df_eq = df_all[df_all["Ekipman_Tipi"] == eq_type].copy()
-        stats = eq_stats.get(eq_type, {'n_total': 0, 'n_events': 0, 'has_marka': 0})
+        stats = eq_stats.get(eq_type, {'n_total': 0, 'n_events': 0, 'has_marka': 0, 'has_bakim': 0})
         preds = pd.DataFrame({"cbs_id": df_eq["cbs_id"]})
         model_source = "Equipment_Specific"
         # 2. DECISION: Use Global Fallback vs Specific Training
@@ -2519,10 +2635,14 @@ def main():
                     if not marka_analysis.empty: all_marka_analyses.append(marka_analysis)
 
                 except Exception: pass
-            try:
-                bakim_analysis = analyze_bakim_effect(equipment_master, eq_type, logger)
-                if not bakim_analysis.empty: all_bakim_analyses.append(bakim_analysis)
-            except Exception: pass
+            # --- BAKIM ANALİZİ (Koşullu) ---
+            if stats.get("has_bakim", 0) >= 30:  # ✅ KOŞUL EKLENDİ!
+                try:
+                    bakim_analysis = analyze_bakim_effect(df_eq, eq_type, logger)
+                    if not bakim_analysis.empty: 
+                        all_bakim_analyses.append(bakim_analysis)
+                except Exception as e:
+                    logger.warning(f"[{eq_type}] Bakim analysis failed: {e}")
 
         # 3. MERGE PREDICTIONS WITH METADATA (FIXED)
         # We merge 'preds' (which only has cbs_id + probabilities) back to df_eq metadata
