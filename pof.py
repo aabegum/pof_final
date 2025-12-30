@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-PoF3 - Clean Production Pipeline | Temporal Validation + Equipment Stratification
+PoF - Clean Production Pipeline | Temporal Validation + Equipment Stratification
 ==================================================================================
 Single script: Data Loading → Feature Engineering → Survival Models → Risk Assessment
 """
@@ -271,7 +271,7 @@ def setup_logger() -> logging.Logger:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(LOG_DIR, f"pof_{ts}.log")
 
-    logger = logging.getLogger("pof3")
+    logger = logging.getLogger("pof")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
@@ -285,7 +285,7 @@ def setup_logger() -> logging.Logger:
     logger.addHandler(ch)
 
     logger.info("="*80)
-    logger.info("PoF3 Pipeline - Clean Production Version")
+    logger.info("PoF Pipeline - Clean Production Version")
     logger.info("="*80)
     return logger
 
@@ -2334,96 +2334,98 @@ def analyze_bakim_effect(df_eq: pd.DataFrame, eq_type: str, logger: logging.Logg
 # =============================================================================
 # 🏥 HEALTH SCORE & RISK MATRIX (SAĞLIK VE RİSK PUANLAMASI)
 # =============================================================================
-# Bu fonksiyon, model çıktısını (PoF) insan tarafından anlaşılır bir puana (0-100) çevirir.
+# Bu fonksiyon, model çıktısını (PoF – Probability of Failure) operasyonel olarak
+# anlamlı bir Sağlık Skoru'na (0–100) ve Risk Sınıfı'na dönüştürür.
 #
-# 📊 Yöntem: Percentile Ranking (Yüzdelik Sıralama)
-#    - Neden? Mutlak olasılıklar (PoF) genellikle çok küçüktür (örn. %0.05).
-#      "Bu trafonun bozulma ihtimali %0.05" demek yerine,
-#      "Bu trafo, filodaki diğer trafoların %99'undan daha risklidir" demek
-#      aksiyon almak için çok daha anlamlıdır.
+# 📊 Yöntem: Percentile Ranking (Yüzdelik Sıralama – Göreli Risk)
+# -----------------------------------------------------------------------------
+# - Mutlak olasılıklar (PoF) genellikle çok küçüktür (örn. %0.1 – %1).
+# - Bu nedenle sistem, "mutlak risk" yerine "göreli risk" yaklaşımını kullanır.
 #
-# 🚦 Sınıflandırma (Pareto 80/20):
-#    - Kritik (Score < 20): Filonun en riskli %20'si. Bakım önceliği burada.
-#    - Düşük (Score > 80): Filonun en güvenli %20'si.
+#   ❌ "Bu trafonun arıza ihtimali %0.12"
+#   ✅ "Bu trafo, aynı tipteki varlıkların %95’inden daha risklidir"
 #
-# ⚠️ Kronik Varlık Kuralı:
-#    - "Chronic_Flag" olan varlıklar, skorları ne olursa olsun otomatik olarak
-#      cezalandırılır ve en fazla 40 puan (Yüksek Risk) alabilirler.
+# - Sıralama, her ekipman tipi kendi içinde yapılır
+#   (Trafo trafoyla, direk direkle kıyaslanır).
+#
+# 🧮 Sağlık Skoru Hesabı:
+# -----------------------------------------------------------------------------
+# - Risk sıralaması (percentile) ters çevrilerek sağlık skoruna dönüştürülür:
+#
+#     Health_Score = 100 × (1 − Risk_Percentile)
+#
+# - En riskli varlıklar → düşük sağlık skoru
+# - En sağlıklı varlıklar → yüksek sağlık skoru
+#
+# 🚦 Risk Sınıfları (Percentile Bazlı):
+# -----------------------------------------------------------------------------
+# - KRİTİK  : En kötü %5  (Risk_Percentile ≥ 0.95)
+# - YÜKSEK  : Sonraki %15 (0.80 ≤ Risk_Percentile < 0.95)
+# - ORTA    : Sonraki %30 (0.50 ≤ Risk_Percentile < 0.80)
+# - DÜŞÜK   : En iyi %50  (Risk_Percentile < 0.50)
+#
+# ⚠️ Kronik Varlık Kuralı (Hard Business Rule):
+# -----------------------------------------------------------------------------
+# - "Chronic_Flag" = 1 olan varlıklar, model skorundan bağımsız olarak
+#   her zaman öncelikli kabul edilir.
+# - Bu varlıkların sağlık skoru en fazla 60 ile sınırlandırılır ve
+#   risk sınıfı otomatik olarak "KRİTİK (KRONİK)" olarak atanır.
+#
+# 🎯 Amaç:
+# -----------------------------------------------------------------------------
+# - Mutlaka filonun en riskli varlıklarını görünür kılmak
+# - Saha ekiplerine her zaman "öncelikli bakım listesi" üretebilmek
+# - Yönetim için göreli, karşılaştırılabilir ve aksiyon alınabilir bir çıktı sağlamak
 # =============================================================================
 
-def compute_health_score(df: pd.DataFrame, logger: logging.Logger = None) -> pd.DataFrame:
-    """
-    GÜNCELLENMİŞ VERSİYON: Yüzdelik Dilim (Percentile) Tabanlı Skorlama   
-    Eski Yöntem: Mutlak PoF (Olasılık) kullanıyordu. PoF değerleri çok düşük (%1-5) olduğu için
-                 herkes "Çok Sağlıklı" (95-99 Puan) çıkıyordu.
-               
-    Yeni Yöntem: Varlıkları kendi ekipman grubu içinde 'Risk Sırasına' dizersiniz.
-                 En kötü %5 -> KRİTİK (Puan < 40)
-                 Bu yöntem, filonun en riskli varlıklarını mutlaka ortaya çıkarır.
 
-    """
-    # 1. En iyi risk metriğini seç
-    # Öncelik: Ensemble > RSF > Cox/ML
-    risk_col = None
+def compute_health_score(df: pd.DataFrame, logger: logging.Logger = None) -> pd.DataFrame:
+
+    # 1. Risk metriğini seç
     if "PoF_Ensemble_12Ay" in df.columns:
         risk_col = "PoF_Ensemble_12Ay"
     elif "rsf_pof_12ay" in df.columns:
         risk_col = "rsf_pof_12ay"
     else:
-        # Fallback: Bulabildiği herhangi bir 12 aylık tahmin
         candidates = [c for c in df.columns if "12" in c and "pof" in c.lower()]
         risk_col = candidates[0] if candidates else None
 
-    # Risk column seçiminden sonra:
     if not risk_col:
-        if logger:
-            logger.warning("[HEALTH] No PoF columns found. Defaulting to Score=90.")
         df["Health_Score"] = 90
         df["Risk_Sinifi"] = "BILINMIYOR"
         return df
-    
-    if logger:
-        logger.info(f"[HEALTH] Calculating scores using: {risk_col}")
-    # NaNs -> 0 (En düşük risk kabul et)
+
     df[risk_col] = df[risk_col].fillna(0)
-    # 2. SIRALAMA (RANKING) - Ekipman Tipine Göre
-    # Transformatörleri kendi içinde, Direkleri kendi içinde en riskliden en aza sırala.
-    # rank(pct=True) -> 0.0 (En iyi) ile 1.0 (En kötü) arasında değer verir.
 
-    if "Ekipman_Tipi" in df.columns:
-        # Her ekipman tipini kendi içinde değerlendir
-        df["Risk_Percentile"] = df.groupby("Ekipman_Tipi")[risk_col].rank(pct=True)
-    else:
-        # Ekipman tipi yoksa global sıralama
-        df["Risk_Percentile"] = df[risk_col].rank(pct=True)       
-    # Tek elemanlı gruplar için fillna (Hata önleyici)
-    df["Risk_Percentile"] = df["Risk_Percentile"].fillna(0.5)
+    # 2. Ekipman tipi içinde risk sıralaması
+    df["Risk_Rank"] = (
+        df.groupby("Ekipman_Tipi")[risk_col]
+          .rank(pct=True)
+          .fillna(0.5)
+    )
 
-    # 3. SAĞLIK SKORU HESABI (Sıralamaya Göre)
-    # En kötü (%100 riskli / Percentile 1.0) -> 0 Puan
-    # En iyi (%0 riskli / Percentile 0.0) -> 100 Puan
-    df["Health_Score"] = 100 * (1 - df["Risk_Percentile"])
+    # 3. Sağlık skoru
+    df["Health_Score"] = 100 * (1 - df["Risk_Rank"])
 
-    # 4. KRONİK CEZALANDIRMASI
-    # Eğer varlık "Kronik" ise (sık arızalanıyorsa), sıralaması iyi olsa bile puanını düşür.
+    # 4. Kronik override
     if "Chronic_Flag" in df.columns:
-        # Kronikse maksimum 60 puan alabilsin (Otomatikman Yüksek Risk bölgesine itiyoruz)
-        mask_chronic = df["Chronic_Flag"] == 1
-        df.loc[mask_chronic, "Health_Score"] = df.loc[mask_chronic, "Health_Score"].clip(upper=60)
-    # 5. RİSK SINIFI ATAMA (Percentile Bazlı)
+        df.loc[df["Chronic_Flag"] == 1, "Health_Score"] = \
+            df.loc[df["Chronic_Flag"] == 1, "Health_Score"].clip(upper=60)
+
+    # 5. Risk sınıfı (percentile bazlı)
     def assign_risk_class(row):
-        score = row["Health_Score"]
-        chronic = row.get("Chronic_Flag", 0)       
-        # Kronikler her zaman öncelikli
-        if chronic == 1:
-            return "KRİTİK (KRONİK)"           
-        # ✅ DÜZELTME: Pareto optimal thresholds (20/80)
-        if score < 20: return "KRİTİK"   # ✅ En kötü %20 (80/20 kuralı)
-        if score < 50: return "YÜKSEK"   # ✅ Sonraki %30 (toplam %50)
-        if score < 80: return "ORTA"     # ✅ Sonraki %30 (toplam %80)
-        return "DÜŞÜK"                   # ✅ En iyi %20
+        if row.get("Chronic_Flag", 0) == 1:
+            return "KRİTİK (KRONİK)"
+        p = row["Risk_Rank"]
+        if p >= 0.95: return "KRİTİK"
+        if p >= 0.80: return "YÜKSEK"
+        if p >= 0.50: return "ORTA"
+        return "DÜŞÜK"
+
     df["Risk_Sinifi"] = df.apply(assign_risk_class, axis=1)
+
     return df
+
 # =============================================================================
 # MAIN PIPELINE
 # =============================================================================
@@ -2531,12 +2533,12 @@ def main():
         df_all[["cbs_id"] + temporal_cols].to_csv(INTERMEDIATE_PATHS["features_temporal"], index=False, encoding="utf-8-sig")
         logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['features_temporal']}")
         
-    # Save combined feature set (ozellikler_pof3)
+    # Save combined feature set (ozellikler_pof)
     all_feature_cols = ["cbs_id"] + structural_cols + temporal_cols + ["event", "duration_days", "entry_days"]
     all_feature_cols = [c for c in all_feature_cols if c in df_all.columns]
-    df_all[all_feature_cols].to_csv(INTERMEDIATE_PATHS["ozellikler_pof3"], index=False, encoding="utf-8-sig")
+    df_all[all_feature_cols].to_csv(INTERMEDIATE_PATHS["ozellikler_pof"], index=False, encoding="utf-8-sig")
     
-    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['ozellikler_pof3']}")
+    logger.info(f"[SAVE] Intermediate: {INTERMEDIATE_PATHS['ozellikler_pof']}")
     logger.info(f"[DATASET] Assets: {len(df_all)} | Features: {len(structural_cols) + len(temporal_cols)}")
 
     # -------------------------------------------------------------------------
@@ -2586,85 +2588,92 @@ def main():
     # Import TQDM for progress bar
     from tqdm import tqdm
     for eq_type in tqdm(unique_types, desc="Training Equipment Models", unit="type"):
-        # 1. Filter Data
-        df_eq = df_all[df_all["Ekipman_Tipi"] == eq_type].copy()
-        stats = eq_stats.get(eq_type, {'n_total': 0, 'n_events': 0, 'has_marka': 0, 'has_bakim': 0})
-        preds = pd.DataFrame({"cbs_id": df_eq["cbs_id"]})
-        model_source = "Equipment_Specific"
-        # 2. DECISION: Use Global Fallback vs Specific Training
-        if stats["n_total"] < MIN_SAMPLES or stats["n_events"] < MIN_EVENTS:
-            # --- GLOBAL FALLBACK (ENHANCED) ---
-            model_source = "Global_Fallback"
-            # A) Global Cox Fallback
-            try:
-                X_eq = select_cox_safe_features(df_eq, structural_cols, logger)
-                # Align features with global model
-                for c in set(global_models["X_cox_cols"]) - set(X_eq.columns):
-                    X_eq[c] = 0
-                X_eq = X_eq[global_models["X_cox_cols"]]
-
-                if cox_global:
-                    cox_pred = predict_survival_pof(cox_global, X_eq, df_eq["duration_days"],
-                                                    SURVIVAL_HORIZONS_DAYS, "cox", df_eq["cbs_id"])
-                    preds = preds.merge(cox_pred, on="cbs_id", how="left")
-            except Exception:
-                pass
-            # B) Global RSF Fallback
-            try:
-                if rsf_global:
-                    rsf_pred = predict_rsf_pof(df_eq, rsf_global, structural_cols, SURVIVAL_HORIZONS_DAYS)
-                    preds = preds.merge(rsf_pred, on="cbs_id", how="left")
-            except Exception:
-                pass
-            # C) Global ML Fallback
-            try:
-                if ml_pack_global:
-                    # Note: predict_ml_pof should handle missing columns internally
-                    ml_pred = predict_ml_pof(df_eq, ml_pack_global, SURVIVAL_HORIZONS_DAYS)
-                    preds = preds.merge(ml_pred, on="cbs_id", how="left")
-            except Exception:
-                pass
-        else:
-            # --- SPECIFIC TRAINING ---
-            preds = train_equipment_specific_models(df_eq, structural_cols, temporal_cols, eq_type, logger)
-            # Specific Explanatory Analyses
-            if stats.get("has_marka", 0) >= 30:
-                try:
-                    marka_analysis = analyze_marka_effect(df_eq, eq_type, logger)
-
-                    if not marka_analysis.empty: all_marka_analyses.append(marka_analysis)
-
-                except Exception: pass
-            # --- BAKIM ANALİZİ (Koşullu) ---
-            if stats.get("has_bakim", 0) >= 30:  # ✅ KOŞUL EKLENDİ!
-                try:
-                    bakim_analysis = analyze_bakim_effect(df_eq, eq_type, logger)
-                    if not bakim_analysis.empty: 
-                        all_bakim_analyses.append(bakim_analysis)
-                except Exception as e:
-                    logger.warning(f"[{eq_type}] Bakim analysis failed: {e}")
-
-        # 3. MERGE PREDICTIONS WITH METADATA (FIXED)
-        # We merge 'preds' (which only has cbs_id + probabilities) back to df_eq metadata
-        meta_cols = ["cbs_id", "Ekipman_Tipi"]
-        if "Fault_Count" in df_eq.columns: meta_cols.append("Fault_Count")
-        preds_full = df_eq[meta_cols].merge(preds, on="cbs_id", how="left")
-        preds_full["Model_Type"] = model_source
-        
-        # 4. COMPUTE HEALTH SCORE
-        # Now preds_full definitely has "Ekipman_Tipi", so grouping works
         try:
-            preds_full = compute_health_score(preds_full)
+            # 1. Filter Data
+            df_eq = df_all[df_all["Ekipman_Tipi"] == eq_type].copy()
+            stats = eq_stats.get(eq_type, {'n_total': 0, 'n_events': 0, 'has_marka': 0, 'has_bakim': 0})
+            preds = pd.DataFrame({"cbs_id": df_eq["cbs_id"]})
+            model_source = "Equipment_Specific"
+            # 2. DECISION: Use Global Fallback vs Specific Training
+            if stats["n_total"] < MIN_SAMPLES or stats["n_events"] < MIN_EVENTS:
+                # --- GLOBAL FALLBACK (ENHANCED) ---
+                model_source = "Global_Fallback"
+                # A) Global Cox Fallback
+                try:
+                    X_eq = select_cox_safe_features(df_eq, structural_cols, logger)
+                    # Align features with global model
+                    for c in set(global_models["X_cox_cols"]) - set(X_eq.columns):
+                        X_eq[c] = 0
+                    X_eq = X_eq[global_models["X_cox_cols"]]
+
+                    if cox_global:
+                        cox_pred = predict_survival_pof(cox_global, X_eq, df_eq["duration_days"],
+                                                        SURVIVAL_HORIZONS_DAYS, "cox", df_eq["cbs_id"])
+                        preds = preds.merge(cox_pred, on="cbs_id", how="left")
+                except Exception:
+                    pass
+                # B) Global RSF Fallback
+                try:
+                    if rsf_global:
+                        rsf_pred = predict_rsf_pof(df_eq, rsf_global, structural_cols, SURVIVAL_HORIZONS_DAYS)
+                        preds = preds.merge(rsf_pred, on="cbs_id", how="left")
+                except Exception:
+                    pass
+                # C) Global ML Fallback
+                try:
+                    if ml_pack_global:
+                        # Note: predict_ml_pof should handle missing columns internally
+                        ml_pred = predict_ml_pof(df_eq, ml_pack_global, SURVIVAL_HORIZONS_DAYS)
+                        preds = preds.merge(ml_pred, on="cbs_id", how="left")
+                except Exception:
+                    pass
+            else:
+                # --- SPECIFIC TRAINING ---
+                preds = train_equipment_specific_models(df_eq, structural_cols, temporal_cols, eq_type, logger)
+                # Specific Explanatory Analyses
+                if stats.get("has_marka", 0) >= 30:
+                    try:
+                        marka_analysis = analyze_marka_effect(df_eq, eq_type, logger)
+
+                        if not marka_analysis.empty: all_marka_analyses.append(marka_analysis)
+
+                    except Exception: pass
+                # --- BAKIM ANALİZİ (Koşullu) ---
+                if stats.get("has_bakim", 0) >= 30:  # ✅ KOŞUL EKLENDİ!
+                    try:
+                        bakim_analysis = analyze_bakim_effect(df_eq, eq_type, logger)
+                        if not bakim_analysis.empty:
+                            all_bakim_analyses.append(bakim_analysis)
+                    except Exception as e:
+                        logger.warning(f"[{eq_type}] Bakim analysis failed: {e}")
+
+            # 3. MERGE PREDICTIONS WITH METADATA (FIXED)
+            # We merge 'preds' (which only has cbs_id + probabilities) back to df_eq metadata
+            meta_cols = ["cbs_id", "Ekipman_Tipi"]
+            if "Fault_Count" in df_eq.columns: meta_cols.append("Fault_Count")
+            preds_full = df_eq[meta_cols].merge(preds, on="cbs_id", how="left")
+            preds_full["Model_Type"] = model_source
+
+            # 4. COMPUTE HEALTH SCORE
+            # Now preds_full definitely has "Ekipman_Tipi", so grouping works
+            try:
+                preds_full = compute_health_score(preds_full, logger)
+            except Exception as e:
+                logger.error(f"[{eq_type}] Health score calc failed: {e}")
+                preds_full["Health_Score"] = 50
+                preds_full["Risk_Sinifi"] = "ORTA"
+
+            # 5. Store Results
+            all_predictions.append(preds_full)
+            # Save individual CSV (Silent to keep progress bar clean)
+            safe_name = str(eq_type).replace("/", "_").replace(" ", "_")
+            out_path = os.path.join(OUTPUT_DIR, f"pof_{safe_name}.csv")
+            preds_full.to_csv(out_path, index=False, encoding="utf-8-sig")
         except Exception as e:
-            logger.error(f"[{eq_type}] Health score calc failed: {e}")
-            preds_full["Health_Score"] = 50
-            preds_full["Risk_Sinifi"] = "ORTA"
-        # 5. Store Results
-        all_predictions.append(preds_full)
-        # Save individual CSV (Silent to keep progress bar clean)
-        safe_name = str(eq_type).replace("/", "_").replace(" ", "_")
-        out_path = os.path.join(OUTPUT_DIR, f"pof_{safe_name}.csv")
-        preds_full.to_csv(out_path, index=False, encoding="utf-8-sig")
+            logger.error(f"[{eq_type}] Failed to process equipment type: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            continue
 
     # -------------------------------------------------------------------------
     # STEP 5: FINALIZE

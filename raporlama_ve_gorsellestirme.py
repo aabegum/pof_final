@@ -114,6 +114,41 @@ def setup_logger():
     logger.addHandler(fh)
     logger.addHandler(logging.StreamHandler(sys.stdout))
     return logger
+def plot_pof_vs_risk(df, logger):
+    """
+    PoF vs Health Score çelişkisini görselleştirir.
+    Amaç: 'Yüksek PoF ama Düşük Risk' / 'Düşük PoF ama Kritik' vakalarını açıklamak.
+    """
+    required = {'PoF_Ensemble_12Ay', 'Health_Score', 'Ekipman_Tipi'}
+    if not required.issubset(df.columns):
+        logger.warning("  ⚠️ PoF vs Risk grafiği için gerekli kolonlar yok.")
+        return None
+
+    risk_col = 'Risk_Class' if 'Risk_Class' in df.columns else 'Risk_Sinifi'
+
+    plt.figure(figsize=(10, 7))
+    sns.scatterplot(
+        data=df,
+        x='PoF_Ensemble_12Ay',
+        y='Health_Score',
+        hue=risk_col,
+        style='Ekipman_Tipi',
+        alpha=0.6
+    )
+
+    plt.axhline(40, color='red', linestyle='--', linewidth=1, label='Kritik Sağlık Eşiği')
+    plt.title('PoF (12 Ay) vs Sağlık Skoru – Risk Mantığı Kontrolü', fontsize=14)
+    plt.xlabel('Arıza Olasılığı (PoF – 12 Ay)')
+    plt.ylabel('Sağlık Skoru (0=Kötü, 100=İyi)')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+
+    path = os.path.join(VISUAL_DIR, "ADV_05_PoF_vs_Health.png")
+    plt.savefig(path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    logger.info("  📊 PoF vs Risk grafiği oluşturuldu.")
+    return path
 
 # ------------------------------------------------------------------------------
 # HELPER: ENSURE POF COLUMN EXISTS
@@ -132,7 +167,26 @@ def ensure_pof_column(df, logger):
     # Olası PoF kolonlarını bul
     candidates = [c for c in df.columns if ('_pof_12' in c.lower()) or ('_12ay' in c.lower() and 'pof' in c.lower())]
     candidates = [c for c in candidates if c != target]
-    
+    weights = {
+        'rsf': 0.5,
+        'cox': 0.3,
+        'ml': 0.2
+    }
+
+    w_sum = 0
+    df[target] = 0.0
+
+    for c in candidates:
+        key = 'rsf' if 'rsf' in c.lower() else 'cox' if 'cox' in c.lower() else 'ml'
+        w = weights.get(key, 0.0)
+        df[target] += w * df[c]
+        w_sum += w
+
+    if w_sum > 0:
+        df[target] /= w_sum
+    else:
+        df[target] = df[candidates].mean(axis=1)
+
     if candidates:
         logger.info(f"  [FIX] Bulunan bileşenler: {candidates}")
         df[target] = df[candidates].mean(axis=1)
@@ -927,7 +981,8 @@ def create_pptx_presentation(df, charts, logger):
         'geo_map': "Coğrafi Risk Yoğunluk Haritası",
         'aggregate_risk': "Ekipman Tipine Göre Risk Analizi",
         'chronic_dist': "Kronik Varlık İstatistikleri",
-        
+        'pof_vs_risk': "PoF vs Sağlık Skoru (Risk Mantığı)",
+
         # --- YENİ EKLENENLER (Advanced Diagnostics) ---
         'drivers': "Risk Faktörleri (Drivers) Analizi",
         'operational': "Operasyonel Durum Paneli",
@@ -960,181 +1015,225 @@ def create_pptx_presentation(df, charts, logger):
         logger.info(f"  💾 Sunum Kaydedildi: {os.path.basename(out_path)}")
     except Exception as e:
         logger.error(f"  ❌ Sunum dosyası kaydedilemedi (Dosya açık olabilir mi?): {e}")
-# ------------------------------------------------------------------------------
-# MAIN ORCHESTRATION
-# ------------------------------------------------------------------------------
 # =============================================================================
-# 🚀 MAIN PIPELINE ORCHESTRATION (ANA YÖNETİM MERKEZİ)
+# 🏥 HEALTH SCORE & RISK CLASSIFICATION
 # =============================================================================
-# Bu fonksiyon, ham veriden nihai raporlara giden uçtan uca (End-to-End) akışı yönetir.
+# Bu modül, model çıktısı olan PoF (Probability of Failure) değerlerini
+# insan tarafından yorumlanabilir bir "Sağlık Skoru (0–100)" ve
+# operasyonel "Risk Sınıfı"na dönüştürür.
 #
-# 🔄 İşlem Adımları (Process Flow):
+# ---------------------------------------------------------------------------
+# 📊 YÖNTEM: RELATIVE RISK RANKING (PERCENTILE-BASED)
+# ---------------------------------------------------------------------------
+# • Mutlak PoF değerleri (örn. %0.5 – %5) operasyonel karar almak için
+#   çoğu zaman yanıltıcıdır.
 #
-# 1. 📥 Data Ingestion (Yükleme):
-#    - Arıza ve Sağlam ekipman verileri okunur, tarihler parse edilir.
-#    - Veri setinin zaman aralığı (Start/End Date) otomatik belirlenir.
+# • Bu nedenle her varlık, kendi Ekipman_Tipi içinde göreli risk sırasına
+#   sokulur (percentile ranking).
 #
-# 2. 🏗️ Dataset Construction (Veri İnşası):
-#    - 'build_equipment_master': Tüm varlıkların tekil listesi çıkarılır.
-#    - 'add_survival_columns': Sol Kesilme (Left Truncation) ve Ömür (Duration) hesaplanır.
-#    - 'Chronic & Temporal': Arıza geçmişine dayalı dinamik özellikler türetilir.
+# • Örnek yorum:
+#   “Bu varlığın PoF’i %1.2” demek yerine,
+#   “Bu varlık, aynı tipteki varlıkların %95’inden DAHA riskli” denir.
 #
-# 3. 🛡️ Global Modeling (Güvenlik Ağı):
-#    - Veri seti küçük olan ekipman tipleri (örn. "Ayırıcı") için tek başına model
-#      eğitmek risklidir (Overfitting).
-#    - Bu adımda tüm veriyi kullanan "Global Modeller" (Cox, RSF, ML) eğitilir.
+# • Böylece:
+#   - Model çıktıları filo büyüklüğünden bağımsız hale gelir
+#   - En riskli varlıklar HER KOŞULDA görünür olur
 #
-# 4. ⚙️ Stratified Training (Katmanlı Eğitim):
-#    - Her ekipman tipi (Trafo, Kesici vb.) için döngüye girilir.
-#    - Karar Mekanizması:
-#      a. Yeterli Veri Var mı? (N > 50, Events > 10) -> O tipe ÖZEL model eğit.
-#      b. Veri Yetersiz mi? -> GLOBAL modelleri kullan (Fallback).
+# ---------------------------------------------------------------------------
+# 🧮 SAĞLIK SKORU HESABI
+# ---------------------------------------------------------------------------
+# Health_Score = 100 × (1 − Risk_Percentile)
 #
-# 5. 🏥 Risk Scoring (Puanlama):
-#    - Modellerin ürettiği olasılıklar (PoF), 0-100 arası "Sağlık Skoru"na çevrilir.
-#    - Kritik ve Kronik varlıklar etiketlenir.
+# • Percentile = 1.00  → En riskli → Health_Score = 0
+# • Percentile = 0.00  → En güvenli → Health_Score = 100
 #
-# 6. 🕰️ Backtesting (Doğrulama):
-#    - Modelin başarısını ölçmek için geçmişe dönük (2022-2024) simülasyon yapılır.
+# Bu skor:
+# - Yatırım önceliği
+# - Bakım planlaması
+# - Yönetici raporlaması
+# için ortak referans metriğidir.
+#
+# ---------------------------------------------------------------------------
+# ⚠️ KRONİK VARLIK KURALI (HARD CONSTRAINT)
+# ---------------------------------------------------------------------------
+# • Chronic_Flag = 1 olan varlıklar,
+#   geçmişte tekrarlayan arızalar göstermiştir.
+#
+# • Bu nedenle:
+#   - Sıralamada iyi olsalar bile
+#   - Health_Score değerleri MAKSİMUM 60 ile sınırlandırılır
+#
+# → Kronik bir varlık asla “Düşük Risk / Çok Sağlıklı” görünemez.
+#
+# ---------------------------------------------------------------------------
+# 🚦 RİSK SINIFI ATAMASI (PERCENTILE BAZLI)
+# ---------------------------------------------------------------------------
+# Risk sınıfları, Risk_Percentile değerine göre atanır:
+#
+#   Percentile ≥ 0.95  → KRİTİK        (En kötü %5)
+#   Percentile ≥ 0.80  → YÜKSEK        (Sonraki %15)
+#   Percentile ≥ 0.50  → ORTA          (Orta %30)
+#   Percentile < 0.50  → DÜŞÜK         (En iyi %50)
+#
+# • Chronic_Flag = 1 ise sınıf otomatik olarak:
+#     → "KRİTİK (KRONİK)"
+#
+# ---------------------------------------------------------------------------
+# 🎯 TASARIM FELSEFESİ
+# ---------------------------------------------------------------------------
+# • Bu yapı “mutlak tahmin doğruluğundan” çok
+#   “doğru önceliklendirme”yi hedefler.
+#
+# • Amaç:
+#   - Bakım ekiplerine: “Nereden başlamalıyım?”
+#   - Yönetime: “Bütçeyi nereye harcamalıyım?”
+#   sorularına net ve savunulabilir cevap vermektir.
 # =============================================================================
+
 def main():
     logger = setup_logger()
-    logger.info("🚀 PoF3 Raporlama Motoru Başlatılıyor...")
-    
-    # 1. Dosya Kontrolü ve Yükleme
-    # pof.py çıktısını arıyoruz
+    logger.info("🚀 PoF Nihai Raporlama ve Sunum Motoru Başlatılıyor...")
+
+    # =============================================================================
+    # 1️⃣ SONUÇ DOSYASI YÜKLEME
+    # =============================================================================
     risk_path = os.path.join(OUTPUT_DIR, "pof_predictions_final.csv")
-    
+
     if not os.path.exists(risk_path):
-        # Fallback: Farklı isimlendirme ihtimaline karşı
         alt_path = os.path.join(OUTPUT_DIR, "risk_equipment_master.csv")
         if os.path.exists(alt_path):
             risk_path = alt_path
         else:
             logger.error(f"[FATAL] Sonuç dosyası bulunamadı: {risk_path}")
-            logger.error("Lütfen önce 'pof.py' (Analiz Motoru) çalıştırın.")
+            logger.error("Önce analiz motoru (pof.py) çalıştırılmalıdır.")
             return
-        
+
     df = pd.read_csv(risk_path)
     logger.info(f"[LOAD] Risk sonuçları yüklendi: {len(df):,} kayıt")
-    
-    # 2. Veri Temizliği ve Standartlaştırma
-    # ID'leri string yap (Merge hatasını önler)
-    df['cbs_id'] = df['cbs_id'].astype(str).str.lower().str.strip()
 
-    # Kolon Eşleştirme (Risk_Sinifi -> Risk_Class)
-    if 'Risk_Sinifi' in df.columns and 'Risk_Class' not in df.columns:
-        df['Risk_Class'] = df['Risk_Sinifi']
-    elif 'Risk_Class' not in df.columns:
-        logger.warning("[WARN] Risk kolonu yok. Varsayılan 'Low' atanıyor.")
-        df['Risk_Class'] = 'Low'
+    # =============================================================================
+    # 2️⃣ VERİ TEMİZLİĞİ VE STANDARTLAŞTIRMA
+    # =============================================================================
+    df["cbs_id"] = df["cbs_id"].astype(str).str.lower().str.strip()
 
-    # PoF Kolonunu Garantiye Al (Mevcut kodunuzdaki satır)
+    # Risk sınıfı standardı
+    if "Risk_Sinifi" in df.columns and "Risk_Class" not in df.columns:
+        df["Risk_Class"] = df["Risk_Sinifi"]
+    elif "Risk_Class" not in df.columns:
+        logger.warning("[WARN] Risk sınıfı bulunamadı. Varsayılan 'Low' atanıyor.")
+        df["Risk_Class"] = "Low"
+
+    # PoF kolonu garanti altına alınır
     df = ensure_pof_column(df, logger)
 
     # =============================================================================
-    # 🚑 [FIX] KRONİK VERİ KURTARMA OPERASYONU
+    # 3️⃣ KRONİK VERİ KURTARMA (DEFENSIVE FIX)
     # =============================================================================
-    # Final dosyada 'Chronic_Flag' yoksa, ara hesaplama dosyasından (ozellikler_zamansal) çeker.
-    if 'Chronic_Flag' not in df.columns and 'Kronik_Flag' not in df.columns:
-        logger.warning("  ⚠️ Ana dosyada 'Chronic_Flag' bulunamadı! Ara dosyalardan kurtarılıyor...")
-        
-        # Log dosyasında gördüğümüz ara çıktı yolu
+    if "Chronic_Flag" not in df.columns and "Kronik_Flag" not in df.columns:
+        logger.warning("⚠️ 'Chronic_Flag' ana tabloda yok. Ara dosyalardan kurtarılıyor...")
+
         chronic_path = os.path.join(INTERMEDIATE_DIR, "ozellikler_zamansal.csv")
-        
+
         if os.path.exists(chronic_path):
             try:
-                # Sadece ID ve Flag kolonlarını oku (Hafif olsun)
-                df_chronic = pd.read_csv(chronic_path, usecols=lambda c: c in ['cbs_id', 'Chronic_Flag', 'Kronik_Flag', 'Fault_Count'])
-                
-                # ID Standardizasyonu (Eşleşme garantisi için)
-                df_chronic['cbs_id'] = df_chronic['cbs_id'].astype(str).str.lower().str.strip()
-                
-                # Kolon ismini belirle
-                source_col = 'Chronic_Flag' if 'Chronic_Flag' in df_chronic.columns else 'Kronik_Flag'
-                
+                df_chronic = pd.read_csv(
+                    chronic_path,
+                    usecols=lambda c: c in ["cbs_id", "Chronic_Flag", "Kronik_Flag"]
+                )
+                df_chronic["cbs_id"] = (
+                    df_chronic["cbs_id"].astype(str).str.lower().str.strip()
+                )
+
+                source_col = (
+                    "Chronic_Flag"
+                    if "Chronic_Flag" in df_chronic.columns
+                    else "Kronik_Flag"
+                    if "Kronik_Flag" in df_chronic.columns
+                    else None
+                )
+
                 if source_col:
-                    # Ana tablo ile birleştir
-                    df = df.merge(df_chronic[['cbs_id', source_col]], on='cbs_id', how='left')
-                    
-                    # NaN değerleri 0 yap (Eşleşmeyenler kronik değildir)
+                    df = df.merge(
+                        df_chronic[["cbs_id", source_col]],
+                        on="cbs_id",
+                        how="left",
+                    )
                     df[source_col] = df[source_col].fillna(0).astype(int)
-                    
-                    # İsim standardı
-                    if source_col != 'Chronic_Flag':
-                        df['Chronic_Flag'] = df[source_col]
-                        
-                    count = df['Chronic_Flag'].sum()
-                    logger.info(f"  ✅ Kronik verisi başarıyla eklendi: {count} adet kronik varlık kurtarıldı.")
+
+                    if source_col != "Chronic_Flag":
+                        df["Chronic_Flag"] = df[source_col]
+
+                    logger.info(
+                        f"✅ Kronik veri kurtarıldı: {df['Chronic_Flag'].sum()} adet"
+                    )
                 else:
-                    logger.error("  ❌ Ara dosyada da flag bulunamadı.")
+                    logger.error("❌ Ara dosyada da kronik flag bulunamadı.")
+
             except Exception as e:
-                logger.error(f"  ❌ Merge işlemi başarısız: {e}")
+                logger.error(f"❌ Kronik veri merge hatası: {e}")
         else:
-            logger.error(f"  ❌ Ara dosya bulunamadı: {chronic_path}")
-            df['Chronic_Flag'] = 0 # Kod patlamasın diye dummy
-    
-    # Hâlâ yoksa (Kurtarma başarısızsa) dummy oluştur
-    if 'Chronic_Flag' not in df.columns:
-        df['Chronic_Flag'] = 0
+            logger.error(f"❌ Ara dosya bulunamadı: {chronic_path}")
+            df["Chronic_Flag"] = 0
+
+    if "Chronic_Flag" not in df.columns:
+        df["Chronic_Flag"] = 0
 
     # =============================================================================
-    # A) Aksiyon Listeleri
+    # 4️⃣ AKSİYON LİSTELERİ & MODEL DOĞRULAMA
+    # =============================================================================
     crit_chronic = generate_action_lists(df, logger)
-    
-    # B) Vaka Analizleri
     case_studies = generate_case_studies(df, logger)
-    
-    # C) Görseller
-    charts = generate_visuals(df, logger)
-    
-    # D) Özel Grafikler
-    agg_path = plot_aggregate_risk_by_type(df, logger)
-    if agg_path: charts['aggregate_risk'] = agg_path 
-    # ... (Mevcut main fonksiyonunun son kısımları) ...
 
-    # 5. Raporları Üret
-    crit_chronic = generate_action_lists(df, logger)
-    case_studies = generate_case_studies(df, logger)
+    # =============================================================================
+    # 5️⃣ TEMEL GÖRSELLER
+    # =============================================================================
     charts = generate_visuals(df, logger)
-    
-    # --- YENİ EKLENEN GELİŞMİŞ GÖRSELLER ---
-    # Bu veriler 'intermediate' klasöründeki dosyalardan okunacak
-    
-    # A) Model Girdisi (Drivers ve Survival için lazım)
+
+    agg_path = plot_aggregate_risk_by_type(df, logger)
+    if agg_path:
+        charts["aggregate_risk"] = agg_path
+
+    # =============================================================================
+    # 6️⃣ GELİŞMİŞ ANALİTİK GÖRSELLER
+    # =============================================================================
     model_data_path = os.path.join(INTERMEDIATE_DIR, "model_input_data_full.csv")
     if os.path.exists(model_data_path):
         df_model = pd.read_csv(model_data_path)
-        
-        # Drivers
-        p1 = plot_risk_drivers(df_model, logger)
-        if p1: charts['drivers'] = p1
-        
-        # Survival Curves
-        p3 = plot_survival_curves(df_model, logger)
-        if p3: charts['survival'] = p3
-    
-    # B) Operasyonel Dashboard
-    p2 = plot_operational_dashboard(logger)
-    if p2: charts['operational'] = p2
-    
-    # C) Sağlık Dashboard
-    p4 = plot_health_dashboard(df, logger)
-    if p4: charts['health_dash'] = p4
-    # ---------------------------------------
 
-    agg_path = plot_aggregate_risk_by_type(df, logger)
-    if agg_path: charts['aggregate_risk'] = agg_path 
-    
-    # 5. Raporlama
+        p1 = plot_risk_drivers(df_model, logger)
+        if p1:
+            charts["drivers"] = p1
+
+        p3 = plot_survival_curves(df_model, logger)
+        if p3:
+            charts["survival"] = p3
+
+    p2 = plot_operational_dashboard(logger)
+    if p2:
+        charts["operational"] = p2
+
+    p4 = plot_health_dashboard(df, logger)
+    if p4:
+        charts["health_dash"] = p4
+
+    p5 = plot_pof_vs_risk(df, logger)
+    if p5:
+        charts["pof_vs_risk"] = p5
+
+    # =============================================================================
+    # 7️⃣ NİHAİ RAPORLAMA & SUNUM
+    # =============================================================================
     create_excel_report(df, crit_chronic, case_studies, logger)
     create_pptx_presentation(df, charts, logger)
-    
-    logger.info("")
-    logger.info("="*60)
-    logger.info("[SUCCESS] Tüm Raporlama Süreci Başarıyla Tamamlandı.")
-    logger.info(f"📂 Çıktı Klasörü: {OUTPUT_DIR}")
-    logger.info("="*60)
+
+    # =============================================================================
+    # 8️⃣ KAPANIŞ
+    # =============================================================================
+    logger.info("=" * 60)
+    logger.info("✅ TÜM RAPORLAMA VE SUNUM SÜRECİ BAŞARIYLA TAMAMLANDI")
+    logger.info(f"📂 Çıktı Dizini: {OUTPUT_DIR}")
+    logger.info("=" * 60)
+
 
 if __name__ == "__main__":
     main()
