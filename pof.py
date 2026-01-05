@@ -82,36 +82,52 @@ CHRONIC_THRESHOLD_EVENTS = CHRONIC_CFG.get("min_events_default", 3)
 CHRONIC_MIN_RATE = CHRONIC_CFG.get("min_rate_per_year_default", 1.5)
 
 # =============================================================================
-# 🧠 FEATURE REGISTRY (ÖZELLİK YÖNETİM MERKEZİ)
+# 🧠 FEATURE REGISTRY (ÖZELLİK YÖNETİM MERKEZİ) - LEAKAGE FIXED!
 # =============================================================================
 # Bu yapı, modelin eğitim stratejisini belirleyen merkezi konfigürasyondur.
 # Modelin "Neyi öğrenmesi gerektiği" (X) ve "Neyi görmemesi gerektiği" (Leakage) burada tanımlanır.
 #
 # 🚫 1. temporal_leakage (YASAKLI LİSTE / DATA LEAKAGE):
-#    - Bu değişkenler, modelin tahmin etmeye çalıştığı "hedefi" (Target) veya 
+#    - Bu değişkenler, modelin tahmin etmeye çalıştığı "hedefi" (Target) veya
 #      henüz gerçekleşmemiş "gelecek bilgisini" içerir.
-#    - Örn: 'event' (sonuç), 'duration_days' (ömür), 'Son_Ariza_Tarihi'.
+#    - Örn: 'event' (sonuç), 'duration_days' (ömür), 'Fault_Count' (toplam arıza sayısı).
 #    - KRİTİK: Bu değişkenler eğitim matrisinden (X) kesinlikle ÇIKARILIR.
 #
-# 📉 2. chronic_features (DİNAMİK SAĞLIK GÖSTERGELERİ):
-#    - Varlığın geçmiş performansından türetilen matematiksel özelliklerdir.
-#    - IEEE 1366 standartlarına göre kroniklik durumu (Flag), arıza sıklığı (Rate) 
-#      ve zaman ağırlıklı yıpranma skorunu (Decay) içerir.
-#    - Modelin varlığı "riskli" olarak tanımasını sağlayan ana sinyallerdir.
+# 📊 2. temporal_features (ZAMANA BAĞLI RİSK GÖSTERGELERİ):
+#    - Varlığın GEÇMİŞ performansından türetilen matematiksel özelliklerdir.
+#    - IEEE 1366 standartlarına göre kroniklik, MTBF, son 90 günlük trend.
+#    - ✅ MODELE GİRECEK! Bu özellikler geçmiş bilgiyi kullanır, gelecek görmez.
 #
 # 🏗️ 3. structural_features (STATİK YAPISAL ÖZELLİKLER):
 #    - Varlığın kimliği, fiziksel özellikleri ve coğrafi konumudur.
 #    - Marka, Tip, Gerilim Seviyesi, İlçe gibi genelde sabit kalan niteliklerdir.
-#    - Modelin "Hangi marka/tip daha dayanıksız?" sorusunu çözmesini sağlar.
 # =============================================================================
 FEATURE_REGISTRY = {
-    "temporal_leakage": ["event", "duration_days", "Ilk_Ariza_Tarihi", "Son_Ariza_Tarihi", 
-                        "Fault_Count", "Ariza_Gecmisi"],
-    "chronic_features": ["Chronic_Flag", "Chronic_Decay_Skoru", "MTBF_Bayes_Gun", 
-                        "Chronic_Trend_Slope", "Chronic_Rate_Yillik"],
-    "structural_features": ["cbs_id", "Ekipman_Tipi", "Kurulum_Tarihi", "Gerilim_Sinifi", 
-                           "Gerilim_Seviyesi", "Marka", "kVA_Rating", "Sehir", "Ilce", 
-                           "Mahalle", "Location_Known", "Musteri_Sayisi"],
+    # 🚫 LEAKAGE - Modele asla girilmeyecek
+    "temporal_leakage": [
+        "event", "duration_days",
+        "Ilk_Ariza_Tarihi", "Son_Ariza_Tarihi", "Ilk_Gercek_Ariza_Tarihi",
+        "Fault_Count"  # Toplam arıza sayısı - future görüyor!
+    ],
+
+    # ✅ TEMPORAL FEATURES - Modele girecek (geçmiş bilgi)
+    "temporal_features": [
+        "Tref_Yas_Gun", "Tref_Ay",
+        "Observation_Ratio",  # Left truncation düzeltmesi
+        "Ariza_Sayisi_90g",  # Son 90 günlük arıza (geçmiş pencere)
+        "Chronic_Rate_Yillik",  # Yıllık arıza oranı (geçmiş hesaplama)
+        "Chronic_Decay_Skoru",  # Zaman ağırlıklı risk (geçmiş decay)
+        "Chronic_Flag",  # Kroniklik bayrağı (geçmiş davranış)
+        "MTBF_Bayes_Gun"  # Bayesian MTBF (geçmiş güvenilirlik)
+    ],
+
+    # 🏗️ STRUCTURAL FEATURES - Modele girecek (statik bilgi)
+    "structural_features": [
+        "cbs_id", "Ekipman_Tipi", "Kurulum_Tarihi",
+        "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka",
+        "kVA_Rating", "Sehir", "Ilce", "Mahalle",
+        "Location_Known", "Musteri_Sayisi", "Bakim_Sayisi_Safe"
+    ],
 }
 
 # =============================================================================
@@ -1238,12 +1254,15 @@ def build_preprocessor(X: pd.DataFrame, logger=None): # <--- logger parametresi 
 # =============================================================================
 
 def select_survival_safe_features(df: pd.DataFrame, structural_cols: list, logger: logging.Logger) -> list:
-    """Filter to leakage-free features"""
-    forbidden = (FEATURE_REGISTRY["temporal_leakage"] + 
-                 FEATURE_REGISTRY["chronic_features"])
-    
+    """
+    Filter to leakage-free features
+    ✅ FIXED: Only exclude temporal_leakage, NOT temporal_features!
+    Temporal features (MTBF, Chronic_Decay, etc.) are SAFE - they use past data only.
+    """
+    forbidden = FEATURE_REGISTRY["temporal_leakage"]  # ← SADECE LEAKAGE!
+
     safe_cols = [c for c in structural_cols if c in df.columns and c not in forbidden]
-    logger.info(f"[FEATURE SELECT] Safe: {len(safe_cols)}/{len(structural_cols)}")
+    logger.info(f"[FEATURE SELECT] Safe: {len(safe_cols)}/{len(structural_cols)} (excluding {len(forbidden)} leakage features)")
     return safe_cols
 
 
@@ -1487,7 +1506,7 @@ def train_rsf_survival(
         #n_estimators=200,
         n_estimators=100,
         min_samples_split=10,
-        min_samples_leaf=5,
+        min_samples_leaf=50,
         random_state=42,
         n_jobs=-1
     )
@@ -2516,14 +2535,18 @@ def main():
         observation_start_date,
         logger
     )
-    # Define Feature Columns
-    structural_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Gerilim_Seviyesi", "Marka"]
-    structural_cols = [c for c in structural_cols if c in df_all.columns]
-    
-    temporal_cols = ["Tref_Yas_Gun", "Tref_Ay", "Ariza_Sayisi_90g",
-                     "Chronic_Rate_Yillik", "Chronic_Decay_Skoru", "Chronic_Flag",
-                     "Observation_Ratio"]
-    temporal_cols = [c for c in temporal_cols if c in df_all.columns]
+    # Define Feature Columns (from FEATURE_REGISTRY)
+    # ✅ Structural features (static properties)
+    structural_base = FEATURE_REGISTRY["structural_features"]
+    structural_cols = [c for c in structural_base if c in df_all.columns]
+
+    # ✅ Temporal features (past-based risk indicators) - NOW INCLUDED!
+    temporal_base = FEATURE_REGISTRY["temporal_features"]
+    temporal_cols = [c for c in temporal_base if c in df_all.columns]
+
+    # Combine all model-eligible features
+    all_model_features = structural_cols + temporal_cols
+    logger.info(f"[FEATURES] Structural: {len(structural_cols)}, Temporal: {len(temporal_cols)}, Total: {len(all_model_features)}")
 
     # Save feature outputs
     if structural_cols:
@@ -2545,9 +2568,10 @@ def main():
     # STEP 3: TRAIN GLOBAL MODELS (FALLBACK)
     # -------------------------------------------------------------------------
     logger.info("\n[GLOBAL] Training fallback models (Cox, RSF, ML)...")
-    
+
+    # ✅ USE ALL MODEL FEATURES (structural + temporal) for global models
     # 1. Global Cox
-    X_cox_global = select_cox_safe_features(df_all, structural_cols, logger)
+    X_cox_global = select_cox_safe_features(df_all, all_model_features, logger)
     cox_global, wb_global = train_cox_weibull(
         X_cox_global,
         df_all["duration_days"],
@@ -2556,9 +2580,11 @@ def main():
         logger
     )
     # 2. Global Random Survival Forest
-    rsf_global = train_rsf_survival(df_all, structural_cols, logger)  
+    rsf_global = train_rsf_survival(df_all, all_model_features, logger)
+
     # 3. Global ML (Gradient Boosting Survival)
-    ml_features_global = structural_cols + [c for c in temporal_cols if c not in ["Kurulum_Tarihi"]]
+    # Remove Kurulum_Tarihi since it's a date, not a numeric/categorical feature for ML
+    ml_features_global = [c for c in all_model_features if c != "Kurulum_Tarihi"]
 
     ml_pack_global = train_ml_models(df_all, ml_features_global, SURVIVAL_HORIZONS_DAYS, logger)
     # Store global models for fallback usage
@@ -2688,7 +2714,7 @@ def main():
     # Combine all
     predictions = pd.concat(all_predictions, ignore_index=True)
     # Final Report Merge (Add context like Voltage, Install Date)
-    report_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Fault_Count", "Kurulum_Tarihi"]
+    report_cols = ["Ekipman_Tipi", "Gerilim_Sinifi", "Fault_Count", "Kurulum_Tarihi", "Marka", "Ilce"]
     report_base = df_all[["cbs_id"] + [c for c in report_cols if c in df_all.columns]].drop_duplicates("cbs_id")
     # Clean duplicates before merge
     cols_to_drop = [c for c in report_cols if c in predictions.columns]
@@ -2715,7 +2741,7 @@ def main():
     mean_health = report["Health_Score"].mean()
 
     logger.info(f"Total assets: {len(report):,}")
-    logger.info(f"Critical assets (Health<40): {critical:,} ({100*critical/len(report):.1f}%)")
+    logger.info(f"Critical assets (Health<20): {critical:,} ({100*critical/len(report):.1f}%)")
     logger.info(f"Mean Health Score: {mean_health:.1f}")
 
     # -------------------------------------------------------------------------
