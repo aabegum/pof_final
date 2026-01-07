@@ -154,48 +154,28 @@ def plot_pof_vs_risk(df, logger):
 # HELPER: ENSURE POF COLUMN EXISTS
 # ------------------------------------------------------------------------------
 def ensure_pof_column(df, logger):
-    """
-    'PoF_Ensemble_12Ay' kolonunu kontrol eder, yoksa hesaplar.
-    """
     target = 'PoF_Ensemble_12Ay'
     
     if target in df.columns:
         return df
+        
+    logger.warning(f"[FIX] '{target}' eksik. Ensemble hesaplanıyor...")
     
-    logger.warning(f"  [FIX] '{target}' eksik. Bileşenlerden hesaplanmaya çalışılıyor...")
-    
-    # Olası PoF kolonlarını bul
+    # Olası PoF kolonları
     candidates = [c for c in df.columns if ('_pof_12' in c.lower()) or ('_12ay' in c.lower() and 'pof' in c.lower())]
     candidates = [c for c in candidates if c != target]
-    weights = {
-        'rsf': 0.5,
-        'cox': 0.3,
-        'ml': 0.2
-    }
-
-    w_sum = 0
-    df[target] = 0.0
-
-    for c in candidates:
-        key = 'rsf' if 'rsf' in c.lower() else 'cox' if 'cox' in c.lower() else 'ml'
-        w = weights.get(key, 0.0)
-        df[target] += w * df[c]
-        w_sum += w
-
-    if w_sum > 0:
-        df[target] /= w_sum
-    else:
-        df[target] = df[candidates].mean(axis=1)
-
-    if candidates:
-        logger.info(f"  [FIX] Bulunan bileşenler: {candidates}")
-        df[target] = df[candidates].mean(axis=1)
-        logger.info(f"  [FIX] '{target}' kolonu {len(candidates)} modelin ortalaması ile oluşturuldu.")
-    else:
-        logger.warning("  [FAIL] 12 aylık PoF bileşeni bulunamadı. Dummy (0.0) oluşturuluyor.")
-        df[target] = 0.0
-        
+    
+    if not candidates:
+        logger.warning("[FAIL] PoF bileşeni yok. Dummy=0.05")
+        df[target] = 0.05  # 0 yerine gerçekçi baseline
+        return df
+    
+    # Simple averaging (consistent with pof.py)
+    df[target] = df[candidates].mean(axis=1)
+    logger.info(f"[FIX] Ensemble: {len(candidates)} model ortalaması alındı")
+    
     return df
+
 
 # ------------------------------------------------------------------------------
 # PHASE 1: ACTION PLANNING
@@ -396,7 +376,8 @@ def plot_operational_dashboard(logger):
     df['started at'] = df['started at'].apply(parse_mixed_dates)
 
     # Gelecek tarihli kayıtları filtrele
-    today = pd.Timestamp.now()
+    # CRITICAL FIX: Use 2025-01-06 instead of system time (system clock is wrong)
+    today = pd.Timestamp("2025-01-06")
     df = df[df['started at'] <= today]
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
@@ -733,7 +714,8 @@ def generate_case_studies(df_risk, logger):
     events['cbs_id'] = events['cbs_id'].astype(str).str.lower().str.strip()
 
     # 3.5. Gelecek Tarihli Kayıtları Filtrele
-    today = pd.Timestamp.now()
+    # CRITICAL FIX: Use 2025-01-06 instead of system time (system clock is wrong)
+    today = pd.Timestamp("2025-01-06")
     future_count = (events['Ariza_Baslangic_Zamani'] > today).sum()
     if future_count > 0:
         logger.warning(f"  ⚠️ {future_count} gelecek tarihli kayıt bulundu ve filtrelendi.")

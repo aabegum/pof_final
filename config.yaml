@@ -91,6 +91,18 @@ ml:
   random_state: 42
 
 # ============================
+# DATA BALANCING
+# ============================
+# IEEE PHM Best Practice: 1:3 to 1:5 for predictive maintenance
+# Reference: Failure ratio (faulty:healthy)
+data_balancing:
+  enabled: false  # DISABLED: Balancing now done AFTER split in temporal_train_test_split()
+  target_ratio: 5  # 1:5 = 17% faulty, 83% healthy
+  method: "undersample"  # Options: undersample, oversample, smote
+  random_state: 42
+  apply_after_split: true  # NEW: Apply balancing separately to train/test sets
+
+# ============================
 # ENSEMBLE & HEALTH SCORE
 # ============================
 ensemble:
